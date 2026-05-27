@@ -1,4 +1,4 @@
-yamlname: Jinji Monitor
+name: Jinji Monitor
 on:
   schedule:
     - cron: '0 0 * * *' # 日本時間の毎日午前9時に実行
