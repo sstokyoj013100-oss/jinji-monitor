@@ -1,7 +1,9 @@
 name: Jinji Monitor
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 0 * * *' # 日本時間の毎日午前9時に実行
+
 jobs:
   run-script:
     runs-on: ubuntu-latest
