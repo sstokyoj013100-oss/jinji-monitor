@@ -18,24 +18,18 @@ CSV_EX_OFFICIALS = "元幹部リスト.csv"
 CSV_IMPORTANT_POSITIONS = "重要ポジション.csv"
 
 def normalize_text(text):
-    """
-    漢字の表記揺れ（高・髙など）と、すべての改行・空白を徹底的に排除・統一する
-    """
+    """空白・改行・異体字のブレを徹底的に排除・統一する"""
     if not text:
         return ""
-    # 空白、改行、タブをすべて削除
     text = re.sub(r'\s+', '', text)
-    # 異体字（はしご高、立つ崎など）の文字ブレを通常漢字に強制統一
-    text = text.replace('髙', '高')
-    text = text.replace('﨑', '崎').replace('嵜', '崎')
-    text = text.replace('栁', '柳').replace('柳', '柳')
+    text = text.replace('髙', '高').replace('﨑', '崎').replace('嵜', '崎').replace('栁', '柳')
     return text
 
 def load_watch_data():
     combined_data = []
     print("[LOG] CSV名簿の読み込みを開始します...", flush=True)
     
-    # ① 元幹部
+    # ① 元幹部リスト
     try:
         with open(CSV_EX_OFFICIALS, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
@@ -51,7 +45,7 @@ def load_watch_data():
     except Exception as e:
         print(f"[ERROR] {CSV_EX_OFFICIALS} 読込失敗: {e}", flush=True)
 
-    # ② 重要ポジション
+    # ② 重要ポジションリスト
     try:
         with open(CSV_IMPORTANT_POSITIONS, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
@@ -120,38 +114,44 @@ def check_ministries():
                 if not target_url.endswith('.pdf'): continue
                 try:
                     pdf_res = requests.get(target_url, headers=headers, timeout=10)
+                    
+                    # ページごとにテキストを完全に独立させてチェック（国交省のバラバラ死対策）
                     with pdfplumber.open(io.BytesIO(pdf_res.content)) as pdf:
-                        raw_text = "".join([page.extract_text() or "" for page in pdf.pages])
-                    
-                    # PDFテキストを正規化（改行を詰め、髙→高に変換）
-                    normalized_pdf_text = normalize_text(raw_text)
-                    
-                    for member in WATCH_DATA:
-                        # 名簿側の名前も正規化（空白を詰め、髙→高に変換）
-                        c_name = normalize_text(member["name"])
-                        if not c_name: continue
-                        
-                        # 1. 完全に一致するか
-                        # 2. または、名前の全漢字がPDFに含まれており、かつ近接しているか（バラバラ死対策）
-                        is_hit = False
-                        if c_name in normalized_pdf_text:
-                            is_hit = True
-                        else:
-                            chars = [c for c in c_name if c.strip()]
-                            if len(chars) >= 2 and all(char in normalized_pdf_text for char in chars):
-                                # 1文字目の周辺150文字以内に全文字があるかチェック
-                                for m in re.finditer(re.escape(chars[0]), raw_text):
-                                    surround = normalize_text(raw_text[max(0, m.start()-150):min(len(raw_text), m.end()+150)])
-                                    if all(char in surround for char in chars):
-                                        is_hit = True
-                                        break
-                        
-                        if is_hit:
-                            print(f"[HIT!!] 対象者を検知しました: {member['name']}", flush=True)
-                            subject = f"{member['type']}{site_name} (該当: {member['name']})"
-                            body = f"以下の人物に関する人事異動情報を検知しました。\n\n■ 該当者: {member['name']}\n■ サイト: {site_name}\n■ PDFリンク: {target_url}"
-                            send_email(subject, body)
+                        for page_num, page in enumerate(pdf.pages, 1):
+                            # 表構造を崩さずにテキスト化
+                            raw_page_text = page.extract_text() or ""
+                            normalized_page_text = normalize_text(raw_page_text)
                             
+                            if not normalized_page_text:
+                                continue
+                                
+                            for member in WATCH_DATA:
+                                c_name = normalize_text(member["name"])
+                                if not c_name or len(c_name) < 2: continue
+                                
+                                # 国交省特有の「名字」と「名前」が大幅に離れて抽出される罠をパース
+                                # 例: 「高橋」と「伸輔」のすべての漢字が同じページ内に含まれているかを厳格にチェック
+                                is_hit = False
+                                if c_name in normalized_page_text:
+                                    is_hit = True
+                                else:
+                                    # 氏名のすべての漢字（例: '高','橋','伸','輔'）がこの1ページにすべて存在するか
+                                    chars = [c for c in c_name if c.strip()]
+                                    if all(char in normalized_page_text for char in chars):
+                                        is_hit = True
+                                
+                                if is_hit:
+                                    print(f"[HIT!!] ページ {page_num} で対象者を検知: {member['name']}", flush=True)
+                                    subject = f"{member['type']}{site_name} (該当: {member['name']})"
+                                    body = (
+                                        f"以下の人物に関する人事異動情報を検知しました。\n\n"
+                                        f"■ 該当者: {member['name']}\n"
+                                        f"■ 想定所属: {member['agency']}\n"
+                                        f"■ 掲載ページ: {page_num} ページ目\n"
+                                        f"■ PDFリンク: {target_url}"
+                                    )
+                                    send_email(subject, body)
+                                    
                 except Exception as pdf_e:
                     continue
             time.sleep(1)
