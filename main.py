@@ -56,19 +56,20 @@ TO_ADDRESS = "sstokyoj@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
 GMAIL_APP_PASSWORD = "qdfy qhwd bssx ptca"
 
+# ご提示いただいた正確な人事・名簿トップページURLに刷新
 TARGET_SITES = {
-    "総務省": "https://www.soumu.go.jp/menu_news/s-news/jinji.html",
+    "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "消防庁": "https://www.fdma.go.jp/pressrelease/jinji/",
-    "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/kanbou/jidou/",
-    "国土交通省(報道発表経由)": "https://www.mlit.go.jp/report/press/index.html",
-    "農林水産省": "https://www.maff.go.jp/j/press/jinji/",
+    "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
+    "農林水産省(人事異動)": "https://www.maff.go.jp/j/org/who/meibo/personnel_change/index.html",
     "水産庁": "https://www.jfa.maff.go.jp/j/press/jinji/",
-    "厚生労働省": "https://www.mhlw.go.jp/kouseiroudoushou/shozaichi/jinji/",
-    "内閣府": "https://www.cao.go.jp/jinji/jinji-shoukai.html",
-    "こども家庭庁": "https://www.cfa.go.jp/pressrelease/",
-    "文部科学省": "https://www.mext.go.jp/b_menu/shingi/jinji/index.htm",
-    "復興庁": "https://www.reconstruction.go.jp/topics/main-cat2/sub-cat2-5/",
+    "厚生労働省(幹部名簿・人事)": "https://www.mhlw.go.jp/kouseiroudoushou/kanbumeibo/index.html",
+    "内閣府(幹部名簿)": "https://www.cao.go.jp/about/meibo.html",
+    "こども家庭庁(人事)": "https://www.cfa.go.jp/about/jinji",
+    "文部科学省(幹部名簿)": "https://www.mext.go.jp/b_menu/soshiki2/kanbumeibo.htm",
+    "復興庁(人事)": "https://www.reconstruction.go.jp/topics/cat-114/jinji/",
     "経済産業省": "https://www.meti.go.jp/annai/saiyou/jinji/index.html",
+    "時事公報(人事ニュース)": "https://www.jihyo.co.jp/jinji_news/",
     "インターネット官報": "https://kanpou.npb.go.jp/"
 }
 
@@ -112,45 +113,6 @@ def is_member_in_pdf(cleaned_name, raw_pdf_text, cleaned_pdf_text):
             return True
     return False
 
-def get_mlit_links_via_backup(headers):
-    """
-    【国土交通省専用：JavaScript対策の特別バイパス処理】
-    国交省の通常のページが動的生成で読めない場合に備え、
-    報道発表のRSSフィード、または裏側のデータ配信用URL構造を解析して直接PDFを抽出します。
-    """
-    mlit_links = set()
-    # 対策A: 国交省の報道発表RSSフィードはXML（静的テキスト）なので確実にJavaScrptを回避して最新URLを取得可能
-    rss_urls = [
-        "https://www.mlit.go.jp/report/press/index.xml",
-        "https://www.mlit.go.jp/about/kanbou/jidou/index.xml" # 存在する場合の備え
-    ]
-    for rss_url in rss_urls:
-        try:
-            res = requests.get(rss_url, headers=headers, timeout=15)
-            if res.status_code == 200:
-                soup = BeautifulSoup(res.text, 'xml')
-                for link_tag in soup.find_all('link'):
-                    href = link_tag.get_text().strip()
-                    if href.endswith('.pdf') or 'jidou' in href or 'jinji' in href:
-                        mlit_links.add(href)
-        except:
-            pass
-
-    # 対策B: 通常の人事ページURLに対して、簡易的なテキストパースで埋め込まれた静的PDFパスを強制抽出
-    try:
-        res = requests.get("https://www.mlit.go.jp/about/kanbou/jidou/", headers=headers, timeout=15)
-        # JavaScriptのコード内に文字列としてPDFへのパスが含まれているケースを正規表現で全スキャン
-        found_paths = re.findall(r'/[^"\']*?jidou[^"\']*?\.pdf|/[^"\']*?jinji[^"\']*?\.pdf', res.text, re.IGNORECASE)
-        for path in found_paths:
-            if path.startswith('http'):
-                mlit_links.add(path)
-            else:
-                mlit_links.add("https://www.mlit.go.jp" + path)
-    except:
-        pass
-        
-    return list(mlit_links)
-
 def check_ministries():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/536.36"
@@ -163,33 +125,29 @@ def check_ministries():
         overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
         
         try:
-            links = []
-            # 国土交通省の場合のみ、JavaScriptをバイパスする専用処理を発動
-            if "国土交通省" in site_name:
-                links = get_mlit_links_via_backup(headers)
+            response = requests.get(url, headers=headers, timeout=20)
+            response.encoding = response.apparent_encoding
+            soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 通常の省庁はこれまでのHTML解析（BeautifulSoup）を実行
-            if not links:
-                response = requests.get(url, headers=headers, timeout=20)
-                response.encoding = response.apparent_encoding
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                for a_tag in soup.find_all('a', href=True):
-                    href = a_tag['href'].strip()
-                    if href.endswith('.pdf') or 'jidou' in href or 'jinji' in href or 'kanpou' in url:
-                        if href.startswith('http'): target_url = href
-                        elif href.startswith('/'):
-                            parsed_url = urlparse(url)
-                            target_url = f"{parsed_url.scheme}://{parsed_url.netloc}{href}"
-                        else: target_url = url.rstrip('/') + '/' + href.lstrip('/')
-                        if target_url not in links:
-                            links.append(target_url)
+            links = []
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href'].strip()
+                # 抽出条件を緩和：拡張子だけでなく、人事・名簿に関わるリンクやPDFを広く収集
+                if href.endswith('.pdf') or href.endswith('.html') or href.endswith('.htm') or 'jidou' in href or 'jinji' in href or 'meibo' in href or 'kanpou' in url:
+                    if href.startswith('http'): target_url = href
+                    elif href.startswith('/'):
+                        parsed_url = urlparse(url)
+                        target_url = f"{parsed_url.scheme}://{parsed_url.netloc}{href}"
+                    else: target_url = url.rstrip('/') + '/' + href.lstrip('/')
+                    if target_url not in links:
+                        links.append(target_url)
 
             pdf_checked_count = 0
             hits_in_site = 0
             
             for target_url in links:
-                if not (target_url.endswith('.pdf') or 'kanpou.npb.go.jp' in target_url):
+                # 最終検証対象はPDF、官報、または時事公報のニュースURL
+                if not (target_url.endswith('.pdf') or 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url):
                     continue
                     
                 try:
@@ -225,7 +183,7 @@ def check_ministries():
                                     hit_members.append(hit_info)
                                     mail_type = member["type"]
                     
-                    if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "report/press" in target_url):
+                    if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
                         subject = f"【要手動確認・画像PDF検出】{site_name}"
                         body = (
                             f"※警告: 文字情報が抽出できない「画像化されたPDF」を検出しました。\n"
