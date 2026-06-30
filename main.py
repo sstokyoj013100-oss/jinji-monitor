@@ -8,6 +8,7 @@ import csv
 from email.mime.text import MIMEText
 from email.utils import formatdate
 import time
+from urllib.parse import urlparse
 
 # ================= 1. 監視対象名簿データの構築 =================
 CSV_EX_OFFICIALS = "元幹部リスト.csv"
@@ -89,44 +90,66 @@ def send_email(subject, body):
 
 def clean_text(text):
     if not text: return ""
-    # 空白、タブ、全角スペース、改行をすべて完全に排除
     return re.sub(r'\s+', '', text).replace(' ', '')
 
 def is_member_in_pdf(cleaned_name, raw_pdf_text, cleaned_pdf_text):
-    """
-    【強化された名前判定ロジック】
-    """
-    # パターン1: スペースを完全に抜いたテキスト同士で単純一致（最も標準的）
     if cleaned_name in cleaned_pdf_text:
         return True
-        
-    # パターン2: 文字の間に改行や特殊文字が挟まっている場合への対策（シーケンス判定）
-    # 例: 「高」「橋」「伸」「輔」の順で、150文字以内の近接エリアにすべて登場するか
     chars = [c for c in cleaned_name if c.strip()]
     if len(chars) < 2: return False
     
     first_char = chars[0]
-    # 原文テキストから1文字目の位置をすべて探し出す
     for match in re.finditer(re.escape(first_char), raw_pdf_text):
         start_pos = match.start()
-        # 1文字目から後ろ200文字の範囲（名前が収まる妥当な長さ）を切り出す
         end_pos = min(len(raw_pdf_text), start_pos + 200)
         surrounding_text = raw_pdf_text[start_pos:end_pos]
-        
-        # 切り出したテキストからスペースを取り除く
         cleaned_surrounding = clean_text(surrounding_text)
         
-        # その中に、空白を除いた「名前全体」が含まれているか判定
         if cleaned_name in cleaned_surrounding:
             return True
-            
-        # さらに、文字が順番通りに並んでいるかを正規表現でチェック
-        # 高.*橋.*伸.*輔 のようなパターンを作る
         regex_pattern = ".*".join([re.escape(c) for c in chars])
         if re.search(regex_pattern, surrounding_text):
             return True
-
     return False
+
+def get_mlit_links_via_backup(headers):
+    """
+    【国土交通省専用：JavaScript対策の特別バイパス処理】
+    国交省の通常のページが動的生成で読めない場合に備え、
+    報道発表のRSSフィード、または裏側のデータ配信用URL構造を解析して直接PDFを抽出します。
+    """
+    mlit_links = set()
+    # 対策A: 国交省の報道発表RSSフィードはXML（静的テキスト）なので確実にJavaScrptを回避して最新URLを取得可能
+    rss_urls = [
+        "https://www.mlit.go.jp/report/press/index.xml",
+        "https://www.mlit.go.jp/about/kanbou/jidou/index.xml" # 存在する場合の備え
+    ]
+    for rss_url in rss_urls:
+        try:
+            res = requests.get(rss_url, headers=headers, timeout=15)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'xml')
+                for link_tag in soup.find_all('link'):
+                    href = link_tag.get_text().strip()
+                    if href.endswith('.pdf') or 'jidou' in href or 'jinji' in href:
+                        mlit_links.add(href)
+        except:
+            pass
+
+    # 対策B: 通常の人事ページURLに対して、簡易的なテキストパースで埋め込まれた静的PDFパスを強制抽出
+    try:
+        res = requests.get("https://www.mlit.go.jp/about/kanbou/jidou/", headers=headers, timeout=15)
+        # JavaScriptのコード内に文字列としてPDFへのパスが含まれているケースを正規表現で全スキャン
+        found_paths = re.findall(r'/[^"\']*?jidou[^"\']*?\.pdf|/[^"\']*?jinji[^"\']*?\.pdf', res.text, re.IGNORECASE)
+        for path in found_paths:
+            if path.startswith('http'):
+                mlit_links.add(path)
+            else:
+                mlit_links.add("https://www.mlit.go.jp" + path)
+    except:
+        pass
+        
+    return list(mlit_links)
 
 def check_ministries():
     headers = {
@@ -140,22 +163,27 @@ def check_ministries():
         overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
         
         try:
-            response = requests.get(url, headers=headers, timeout=20)
-            response.encoding = response.apparent_encoding
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
             links = []
-            for a_tag in soup.find_all('a', href=True):
-                href = a_tag['href'].strip()
-                if href.endswith('.pdf') or 'jidou' in href or 'jinji' in href or 'kanpou' in url:
-                    if href.startswith('http'): target_url = href
-                    elif href.startswith('/'):
-                        from urllib.parse import urlparse
-                        parsed_url = urlparse(url)
-                        target_url = f"{parsed_url.scheme}://{parsed_url.netloc}{href}"
-                    else: target_url = url.rstrip('/') + '/' + href.lstrip('/')
-                    if target_url not in links:
-                        links.append(target_url)
+            # 国土交通省の場合のみ、JavaScriptをバイパスする専用処理を発動
+            if "国土交通省" in site_name:
+                links = get_mlit_links_via_backup(headers)
+            
+            # 通常の省庁はこれまでのHTML解析（BeautifulSoup）を実行
+            if not links:
+                response = requests.get(url, headers=headers, timeout=20)
+                response.encoding = response.apparent_encoding
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                for a_tag in soup.find_all('a', href=True):
+                    href = a_tag['href'].strip()
+                    if href.endswith('.pdf') or 'jidou' in href or 'jinji' in href or 'kanpou' in url:
+                        if href.startswith('http'): target_url = href
+                        elif href.startswith('/'):
+                            parsed_url = urlparse(url)
+                            target_url = f"{parsed_url.scheme}://{parsed_url.netloc}{href}"
+                        else: target_url = url.rstrip('/') + '/' + href.lstrip('/')
+                        if target_url not in links:
+                            links.append(target_url)
 
             pdf_checked_count = 0
             hits_in_site = 0
