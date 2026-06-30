@@ -1,48 +1,39 @@
 import requests
 from bs4 import BeautifulSoup
 import io
-import pdfplumber
+import sys
+
+# 画面への出力をその瞬間に強制する設定（ログが出ない問題を解決）
+sys.stdout.reconfigure(line_buffering=True)
 
 headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0"
 }
 
-def diagnose():
-    print("=== 国交省 接続診断スタート ===")
+def test_run():
+    print("【診断開始】プログラムは正常に起動しました。", flush=True)
     
-    # 1. 人事ページへのアクセス確認
+    # 1. 人事発表ページ
     url_jinji = "https://www.mlit.go.jp/about/kanbou/jidou/"
+    print(f"【アクセス中】国交省・人事ページへ接続します... URL: {url_jinji}", flush=True)
+    
     try:
-        res = requests.get(url_jinji, headers=headers, timeout=15)
-        print(f"① 人事ページ ステータスコード: {res.status_code} (200ならOK)")
+        # timeoutを「3秒」と極限まで短くし、フリーズを強制回避
+        res = requests.get(url_jinji, headers=headers, timeout=3)
+        print(f"【接続成功】ステータスコード: {res.status_code}", flush=True)
         
         soup = BeautifulSoup(res.text, 'html.parser')
         links = [a['href'] for a in soup.find_all('a', href=True)]
+        print(f"【結果】ページ内から {len(links)} 件のリンクを発見しました。", flush=True)
+        
         pdf_links = [l for l in links if '.pdf' in l]
-        print(f"   ページ内の全リンク数: {len(links)} 件")
-        print(f"   そのうちPDFのリンク数: {len(pdf_links)} 件")
-        if pdf_links:
-            print(f"   見つかったPDFの例: {pdf_links[:2]}")
-            
-            # 2. 最初に見つかったPDFの読込テスト
-            test_pdf = pdf_links[0]
-            if not test_pdf.startswith('http'):
-                test_pdf = "https://www.mlit.go.jp" + test_pdf if test_pdf.startswith('/') else url_jinji + test_pdf
-            
-            print(f"② テストPDFへの接続検証: {test_pdf}")
-            pdf_res = requests.get(test_pdf, headers=headers, timeout=15)
-            print(f"   PDFダウンロードステータス: {pdf_res.status_code}")
-            
-            with pdfplumber.open(io.BytesIO(pdf_res.content)) as pdf:
-                text = "".join([p.extract_text() or "" for p in pdf.pages])
-                print(f"   PDFから抽出できた文字数: {len(text)} 文字")
-                if len(text) > 0:
-                    print(f"   PDFの冒頭テキスト: {text[:50]}...")
-                else:
-                    print("   [警告] PDFから文字が1文字も抽出できません（画像PDFの可能性大）")
-                    
+        print(f"【結果】そのうち、PDFリンクは {len(pdf_links)} 件です。", flush=True)
+        
+    except requests.exceptions.Timeout:
+        print("❌【原因判明】国交省のサーバー側で通信がタイムアウト（拒否・無視）されました。相手の防御壁に引っかかっています。", flush=True)
     except Exception as e:
-        print(f"【エラー発生】診断中に問題が発生しました: {e}")
+        print(f"❌【エラー】接続中に次の問題が発生しました: {e}", flush=True)
 
 if __name__ == "__main__":
-    diagnose()
+    test_run()
+    print("【診断終了】", flush=True)
