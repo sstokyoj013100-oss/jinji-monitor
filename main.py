@@ -247,4 +247,11 @@ def check_ministries():
             report_body += "  詳細ログ:\n" + "\n".join([f"    - {d}" for d in res['details']]) + "\n"
         report_body += "----------------------------------------\n"
         
-    report_body += f
+    report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n"
+    report_body += "※このメールはプログラムが正常に動作していることを証明するために自動送信されています。"
+    
+    print("【報告】定期生存報告メールを送信します...")
+    send_email(report_subject, report_body)
+
+if __name__ == "__main__":
+    check_ministries()
