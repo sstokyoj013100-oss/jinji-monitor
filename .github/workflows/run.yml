@@ -16,4 +16,6 @@ jobs:
     - name: Install dependencies
       run: pip install requests beautifulsoup4 pdfplumber
     - name: Run logic
+    env:
+        PYTHONUNBUFFERED: "1" # ← ★この2行を必ず追加してください
       run: python main.py
