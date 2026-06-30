@@ -60,7 +60,7 @@ TARGET_SITES = {
     "総務省": "https://www.soumu.go.jp/menu_news/s-news/jinji.html",
     "消防庁": "https://www.fdma.go.jp/pressrelease/jinji/",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/kanbou/jidou/",
-    "国土交通省(報道発表経由)": "https://www.mlit.go.jp/report/press/index.html", # JS回避用バックアップ
+    "国土交通省(報道発表経由)": "https://www.mlit.go.jp/report/press/index.html",
     "農林水産省": "https://www.maff.go.jp/j/press/jinji/",
     "水産庁": "https://www.jfa.maff.go.jp/j/press/jinji/",
     "厚生労働省": "https://www.mhlw.go.jp/kouseiroudoushou/shozaichi/jinji/",
@@ -110,21 +110,24 @@ def is_member_in_pdf(cleaned_name, raw_pdf_text, cleaned_pdf_text):
 
 def check_ministries():
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/536.36"
     }
+    
+    # 切り分け用：全省庁のチェック結果を記録する辞書
+    overall_results = {}
     
     for site_name, url in TARGET_SITES.items():
         print(f"【巡回中】{site_name} をチェックしています...")
+        overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
+        
         try:
             response = requests.get(url, headers=headers, timeout=20)
             response.encoding = response.apparent_encoding
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 各ページ内のリンクを抽出
             links = []
             for a_tag in soup.find_all('a', href=True):
                 href = a_tag['href'].strip()
-                # 人事異動に関係しそうなPDF、または通常リンクを網羅
                 if href.endswith('.pdf') or 'jidou' in href or 'jinji' in href or 'kanpou' in url:
                     if href.startswith('http'): target_url = href
                     elif href.startswith('/'):
@@ -135,76 +138,20 @@ def check_ministries():
                     if target_url not in links:
                         links.append(target_url)
 
-            # 抽出した各URLの精査
+            # サイトごとの進捗追跡
+            pdf_checked_count = 0
+            hits_in_site = 0
+            
             for target_url in links:
                 if not (target_url.endswith('.pdf') or 'kanpou.npb.go.jp' in target_url):
-                    continue # 最終ターゲットがPDFまたは官報HTML以外はスキップ
+                    continue
                     
                 try:
                     res = requests.get(target_url, headers=headers, timeout=20)
                     if res.status_code != 200: continue
-                        
+                    
+                    pdf_checked_count += 1
                     raw_text = ""
                     is_image_pdf = False
                     
-                    if target_url.endswith('.pdf'):
-                        with pdfplumber.open(io.BytesIO(res.content)) as pdf:
-                            raw_text = "".join([page.extract_text(layout=True) or "" for page in pdf.pages])
-                        
-                        # 画像PDF判定（ファイルサイズが大きいのにテキストが全く抽出できない場合）
-                        if len(res.content) > 50000 and len(raw_text.strip()) < 10:
-                            is_image_pdf = True
-                    else:
-                        html_soup = BeautifulSoup(res.text, 'html.parser')
-                        raw_text = html_soup.get_text()
-                    
-                    cleaned_pdf_text = clean_text(raw_text)
-                    hit_members = []
-                    mail_type = "【人事異動検知】"
-                    
-                    # 1. 通常の文字マッチング
-                    if not is_image_pdf:
-                        for member in WATCH_DATA:
-                            cleaned_name = clean_text(member["name"])
-                            if not cleaned_name: continue
-                                
-                            if is_member_in_pdf(cleaned_name, raw_text, cleaned_pdf_text):
-                                hit_info = f"{member['name']}（現想定所属: {member['agency']} / 備考: {member['memo']}）"
-                                if hit_info not in hit_members:
-                                    hit_members.append(hit_info)
-                                    mail_type = member["type"]
-                    
-                    # 2. 【超重要】画像PDFだった場合のセーフティネットアラート
-                    # テキストが読めない人事PDFが本日更新されていたら、見落とし防止のため強制的に通知する
-                    if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "report/press" in target_url):
-                        subject = f"【要手動確認・画像PDF検出】{site_name}"
-                        body = (
-                            f"※警告: 文字情報が抽出できない「画像化されたPDF」を検出しました。\n"
-                            f"高橋さん等の該当者が含まれている可能性があるため、手動でご確認ください。\n\n"
-                            f"■ 発信元サイト: {site_name}\n"
-                            f"■ 対象PDFリンク: {target_url}\n"
-                        )
-                        send_email(subject, body)
-                        continue
-
-                    # 該当者が通常マッチした場合のメール送信
-                    if hit_members:
-                        subject = f"{mail_type}{site_name}"
-                        body = (
-                            f"以下の人物に関する人事異動情報を検知しました。\n\n"
-                            f"■ 発信元サイト: {site_name}\n"
-                            f"■ 該当者:\n" + "\n".join([f"  ・ {m}" for m in hit_members]) + "\n"
-                            f"■ 掲載リンク: {target_url}\n\n"
-                            f"※このメールは自動監視エージェントから送信されています。"
-                        )
-                        send_email(subject, body)
-                            
-                except Exception as file_error:
-                    continue
-            time.sleep(1)
-                        
-        except Exception as e:
-            print(f"【エラー】{site_name}のチェック中にエラー: {e}")
-
-if __name__ == "__main__":
-    check_ministries()
+                    if target_url.endswith('.
