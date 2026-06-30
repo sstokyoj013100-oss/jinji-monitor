@@ -55,7 +55,6 @@ TO_ADDRESS = "sstokyoj@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
 GMAIL_APP_PASSWORD = "qdfy qhwd bssx ptca"
 
-# 国交省のJavaScript対策として、報道発表のバックアップURLおよびRSSを組み込み
 TARGET_SITES = {
     "総務省": "https://www.soumu.go.jp/menu_news/s-news/jinji.html",
     "消防庁": "https://www.fdma.go.jp/pressrelease/jinji/",
@@ -90,22 +89,43 @@ def send_email(subject, body):
 
 def clean_text(text):
     if not text: return ""
-    return re.sub(r'\s+', '', text)
+    # 空白、タブ、全角スペース、改行をすべて完全に排除
+    return re.sub(r'\s+', '', text).replace(' ', '')
 
 def is_member_in_pdf(cleaned_name, raw_pdf_text, cleaned_pdf_text):
+    """
+    【強化された名前判定ロジック】
+    """
+    # パターン1: スペースを完全に抜いたテキスト同士で単純一致（最も標準的）
     if cleaned_name in cleaned_pdf_text:
         return True
+        
+    # パターン2: 文字の間に改行や特殊文字が挟まっている場合への対策（シーケンス判定）
+    # 例: 「高」「橋」「伸」「輔」の順で、150文字以内の近接エリアにすべて登場するか
     chars = [c for c in cleaned_name if c.strip()]
     if len(chars) < 2: return False
     
-    if all(c in cleaned_pdf_text for c in chars):
-        first_char = chars[0]
-        for match in re.finditer(re.escape(first_char), raw_pdf_text):
-            start_pos = max(0, match.start() - 150)
-            end_pos = min(len(raw_pdf_text), match.end() + 150)
-            surrounding_text = raw_pdf_text[start_pos:end_pos]
-            if all(c in surrounding_text for c in chars):
-                return True
+    first_char = chars[0]
+    # 原文テキストから1文字目の位置をすべて探し出す
+    for match in re.finditer(re.escape(first_char), raw_pdf_text):
+        start_pos = match.start()
+        # 1文字目から後ろ200文字の範囲（名前が収まる妥当な長さ）を切り出す
+        end_pos = min(len(raw_pdf_text), start_pos + 200)
+        surrounding_text = raw_pdf_text[start_pos:end_pos]
+        
+        # 切り出したテキストからスペースを取り除く
+        cleaned_surrounding = clean_text(surrounding_text)
+        
+        # その中に、空白を除いた「名前全体」が含まれているか判定
+        if cleaned_name in cleaned_surrounding:
+            return True
+            
+        # さらに、文字が順番通りに並んでいるかを正規表現でチェック
+        # 高.*橋.*伸.*輔 のようなパターンを作る
+        regex_pattern = ".*".join([re.escape(c) for c in chars])
+        if re.search(regex_pattern, surrounding_text):
+            return True
+
     return False
 
 def check_ministries():
@@ -227,11 +247,4 @@ def check_ministries():
             report_body += "  詳細ログ:\n" + "\n".join([f"    - {d}" for d in res['details']]) + "\n"
         report_body += "----------------------------------------\n"
         
-    report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n"
-    report_body += "※このメールはプログラムが正常に動作していることを証明するために自動送信されています。"
-    
-    print("【報告】定期生存報告メールを送信します...")
-    send_email(report_subject, report_body)
-
-if __name__ == "__main__":
-    check_ministries()
+    report_body += f
