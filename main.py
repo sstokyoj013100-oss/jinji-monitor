@@ -362,7 +362,7 @@ def check_ministries():
                                 # ★【改良】PDFなら同じ行のデータに絞り、HTMLなら前後文字を切り取る
                                 if page_obj:
                                     new_position_hint = get_surrounding_context_by_line(page_obj, member["name"])
-                                Anti-clutter-else:
+                                else:
                                     new_position_hint = get_surrounding_context_html(member["name"], raw_text)
                                 
                                 source_detail = {
