@@ -20,7 +20,6 @@ CSV_IMPORTANT_POSITIONS = "重要ポジション.csv"
 
 def clean_text(text):
     if not text: return ""
-    # \s+ で半角・全角スペース、改行、タブのすべてが同時に除去されます
     return re.sub(r'\s+', '', str(text))
 
 def load_watch_data():
@@ -60,14 +59,14 @@ def load_watch_data():
 
 WATCH_DATA = load_watch_data()
 
-# ================= 2. 送信設定 =================
+# ================= 2. 送信設定・ターゲットURL =================
 TO_ADDRESS_DETECT = "sstokyoj@city.shimonoseki.yamaguchi.jp"
 TO_ADDRESS_REPORT = "miura.daijirou@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
-# セキュリティ対策: 環境変数から取得（設定されていない場合はベタ書きをフォールバックに）
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
+# ご要望に基づきURLリストを最適化
 TARGET_SITES = {
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
@@ -77,8 +76,9 @@ TARGET_SITES = {
     "こども家庭庁(人事)": "https://www.cfa.go.jp/about/jinji",
     "文部科学省(幹部名簿)": "https://www.mext.go.jp/b_menu/soshiki2/kanbumeibo.htm",
     "復興庁(人事)": "https://www.reconstruction.go.jp/topics/cat-114/jinji/",
-    "経済産業省(人事・採用)": "https://www.meti.go.jp/annai/saiyou/jinji/index.html",
-    "経済産業省(幹部名簿)": "https://www.meti.go.jp/intro/data/index_leaders.html",
+    # 💡 経済産業省(人事・採用)のデッドリンクは削除しました
+    # 💡 経済産業省(幹部名簿)を確実なPDF直リンクに差し替えました
+    "経済産業省(幹部名簿PDF)": "https://www.meti.go.jp/intro/data/pdf/list_ja.pdf",
     "時事公報(人事ニュース)": "https://www.jihyo.co.jp/jinji_news/",
     "インターネット官報": "https://kanpou.npb.go.jp/"
 }
@@ -86,7 +86,6 @@ TARGET_SITES = {
 # ================= 3. 通信・メール・解析の最適化関数 =================
 def create_retry_session():
     session = requests.Session()
-    # 接続エラー対策のためバックオフ係数を2に増やし、リトライ間隔を最適化
     retries = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("http://", adapter)
@@ -114,7 +113,6 @@ def parse_pdf_date(date_str):
     if not date_str: return None
     clean_str = date_str.replace("D:", "").replace("'", "").replace("Z", "")
     
-    # インデックスエラー（IndexError）を防ぐため、安全にグループから日付を抽出する形に修正
     match = re.match(r'^(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?(\d{2})?', clean_str)
     if match:
         try:
@@ -135,23 +133,22 @@ def extract_vertical_text_from_page(page):
     words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
     return "".join([w['text'] for w in words_sorted])
 
-def get_surrounding_context_html(name, raw_text):
-    """ HTML用の周辺テキスト抽出（前後60文字） """
+def get_surrounding_context_html(name, raw_text, site_name=""):
+    """ HTML用の周辺テキスト抽出 """
     cleaned_raw = re.sub(r'\s+', ' ', raw_text)
     pattern = ".*".join([re.escape(c) for c in name if c.strip()])
     match = re.search(pattern, cleaned_raw)
     if match:
-        start = max(0, match.start() - 60)
-        end = min(len(cleaned_raw), match.end() + 60)
+        # 💡 厚生労働省の場合は抜き出しすぎを防ぐため、前後「25文字」に制限。その他は60文字。
+        width = 25 if "厚生労働省" in site_name else 60
+        start = max(0, match.start() - width)
+        end = min(len(cleaned_raw), match.end() + width)
         context = cleaned_raw[start:end].strip()
         return f"... {context} ..."
     return "周辺情報の取得失敗"
 
 def get_surrounding_context_by_line(page, member_name):
-    """
-    【新機能】PDF用：氏名と同じ行（同じ高さ・y座標）にあるテキストだけを横一列で抽出する。
-    これにより、上下の行の無関係な情報（ノイズ）を完全にカットします。
-    """
+    """ PDF用：氏名と同じ行（同じ高さ）にあるテキストだけを横一列で抽出 """
     words = page.extract_words()
     if not words: return "周辺情報の取得失敗"
     
@@ -170,16 +167,13 @@ def get_surrounding_context_by_line(page, member_name):
     base_top = base_word['top']
     base_bottom = base_word['bottom']
     
-    # 同じ行とみなす上下の許容誤差（ピクセル単位）
     tolerance = 5 
     
-    # 氏名と同じ高さにある単語を抽出
     same_line_words = [
         w for w in words 
         if (base_top - tolerance) <= w['top'] <= (base_bottom + tolerance)
     ]
     
-    # 左から右へ並び替えて結合
     same_line_words_sorted = sorted(same_line_words, key=lambda w: w['x0'])
     line_text = " ".join([w['text'] for w in same_line_words_sorted])
     
@@ -206,6 +200,10 @@ def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
     return False
 
 def collect_links_from_url(session, url, headers, deep_crawl=False):
+    # PDF直リンクが直接指定された場合は、リンク収集をせず自身のみを返す（経産省幹部名簿対策）
+    if url.endswith('.pdf'):
+        return [url]
+        
     links = []
     try:
         res = session.get(url, headers=headers, timeout=40)
@@ -263,7 +261,6 @@ def build_grouped_email_body(hits_dict):
 
 # ================= 4. メイン監視処理 =================
 def check_ministries():
-    # 経産省などの拒否対策：人間味のある最新のブラウザヘッダーをシミュレート
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -272,7 +269,6 @@ def check_ministries():
     }
     
     now = datetime.now()
-    # ★ご要望に基づき、古いファイルの除外基準を 180日 から「90日」に短縮し、高速化
     ninety_days_ago = now - timedelta(days=90)
     twenty_four_hours_ago = now - timedelta(hours=24)
     
@@ -316,7 +312,6 @@ def check_ministries():
                         pdf_date = parse_pdf_date(pdf_date_str)
                         
                         if pdf_date:
-                            # ★90日より古いPDFはこの時点で即スキップ（超高速化）
                             if pdf_date < ninety_days_ago:
                                 overall_results[site_name]['details'].append(f"古いPDFのためスキップ (更新日: {pdf_date.strftime('%Y-%m-%d')}): {target_url}")
                                 continue
@@ -332,20 +327,17 @@ def check_ministries():
                                 if len(v_text.strip()) > len(page_raw.strip()):
                                     page_raw = v_text
                                     
-                            # 後方互換性と行解析のために page（オブジェクト）自体も末尾に保持
                             pages_data.append((str(idx), page_raw, clean_text(page_raw), page))
                         
                         total_raw_len = sum(len(p[1].strip()) for p in pages_data)
                         if len(res.content) > 50000 and total_raw_len < 10:
                             is_image_pdf = True
                 else:
-                    # HTML（ウェブページ）の解析
                     checked_count += 1
                     html_soup = BeautifulSoup(res.text, 'html.parser')
                     for s in html_soup(['script', 'style', 'nav', 'footer']):
                         s.decompose()
                     html_text = html_soup.get_text()
-                    # HTMLの場合は page オブジェクトがないので末尾は None
                     pages_data.append(("-", html_text, clean_text(html_text), None))
                     
                     if 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url:
@@ -359,11 +351,11 @@ def check_ministries():
                         for page_num, raw_text, cleaned_text_data, page_obj in pages_data:
                             if is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
                                 
-                                # ★【改良】PDFなら同じ行のデータに絞り、HTMLなら前後文字を切り取る
                                 if page_obj:
                                     new_position_hint = get_surrounding_context_by_line(page_obj, member["name"])
                                 else:
-                                    new_position_hint = get_surrounding_context_html(member["name"], raw_text)
+                                    # 💡 厚労省対策として、サイト名を引数に渡す形に修正
+                                    new_position_hint = get_surrounding_context_html(member["name"], raw_text, site_name)
                                 
                                 source_detail = {
                                     "site_name": site_name,
@@ -449,7 +441,6 @@ def check_ministries():
     report_body += "※このメールはプログラムが正常に動作していることを証明するために自動送信されています。"
     email_tasks.append((report_subject, report_body, TO_ADDRESS_REPORT))
     
-    # 溜まったタスクを安全に一括送信
     if email_tasks:
         print(f"【報告】メール送信処理を開始します（計 {len(email_tasks)} 通）...")
         send_emails_batch(email_tasks)
