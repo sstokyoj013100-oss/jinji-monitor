@@ -8,7 +8,7 @@ import csv
 from email.mime.text import MIMEText
 from email.utils import formatdate
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 # ================= 1. 監視対象名簿データの構築 =================
 CSV_EX_OFFICIALS = "元幹部リスト.csv"
@@ -56,12 +56,11 @@ TO_ADDRESS = "sstokyoj@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
 GMAIL_APP_PASSWORD = "qdfy qhwd bssx ptca"
 
+# 消防庁・水産庁を調査対象から除外
 TARGET_SITES = {
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
-    "消防庁": "https://www.fdma.go.jp/pressrelease/jinji/",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
     "農林水産省(人事異動)": "https://www.maff.go.jp/j/org/who/meibo/personnel_change/index.html",
-    "水産庁": "https://www.jfa.maff.go.jp/j/press/jinji/",
     "厚生労働省(幹部名簿・人事)": "https://www.mhlw.go.jp/kouseiroudoushou/kanbumeibo/index.html",
     "内閣府(幹部名簿)": "https://www.cao.go.jp/about/meibo.html",
     "こども家庭庁(人事)": "https://www.cfa.go.jp/about/jinji",
@@ -92,6 +91,33 @@ def clean_text(text):
     if not text: return ""
     return re.sub(r'\s+', '', text).replace(' ', '')
 
+def extract_vertical_text(pdf_pages):
+    """縦書きPDF対応：文字の座標（x0, top）を利用して、並び順を並び替えてテキスト化する"""
+    full_text = ""
+    for page in pdf_pages:
+        words = page.extract_words()
+        # 縦書きは右から左、上から下に読まれることが多いため、x0(右側ほど大きく、左ほど小さい)とtopでソートを試みる
+        # 簡易的に、大まかな列ごとにグループ化して上から下に結合
+        if not words:
+            continue
+        # x0の降順（右から左）、かつ同じ列ならtopの昇順（上から下）
+        # ただし単純ソートだとズレるため、x座標を10px単位で丸めて列を作る
+        words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
+        page_text = "".join([w['text'] for w in words_sorted])
+        full_text += page_text + "\n"
+    return full_text
+
+def get_surrounding_context(name, raw_text):
+    """人名の周辺テキスト（新所属などのヒント）を抽出する"""
+    cleaned_raw = re.sub(r'\s+', ' ', raw_text) # 改行をスペースに置換して1行にする
+    match = re.search(re.escape(name), cleaned_raw)
+    if match:
+        start = max(0, match.start() - 60)
+        end = min(len(cleaned_raw), match.end() + 60)
+        context = cleaned_raw[start:end].strip()
+        return f"... {context} ..."
+    return "周辺情報の取得失敗"
+
 def is_member_in_pdf(cleaned_name, raw_pdf_text, cleaned_pdf_text):
     if cleaned_name in cleaned_pdf_text:
         return True
@@ -112,142 +138,177 @@ def is_member_in_pdf(cleaned_name, raw_pdf_text, cleaned_pdf_text):
             return True
     return False
 
+def collect_links_from_url(url, headers, deep_crawl=False):
+    """指定したURLから検証対象のリンクを収集する（urljoinで不具合対策）"""
+    links = []
+    try:
+        res = requests.get(url, headers=headers, timeout=20)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href'].strip()
+            # urljoinを使い、相対パス（./meibo/ や /about/）を正確な絶対URLに変換
+            target_url = urljoin(url, href)
+            
+            # 条件に合致するリンクを収集
+            if href.endswith('.pdf') or href.endswith('.html') or href.endswith('.htm') or 'jidou' in href or 'jinji' in href or 'meibo' in href or 'kanpou' in url:
+                if target_url not in links:
+                    links.append(target_url)
+                    
+        # 総務省などの「ワンクッション先の中ページ」も追跡する設定の場合
+        if deep_crawl:
+            sub_links = []
+            for l in links:
+                # htmlページかつ、人事や移動に関わりそうな中ページであればもう1階層掘る
+                if (l.endswith('.html') or l.endswith('.htm')) and ('jinji' in l or 'sosiki' in l or 'meibo' in l):
+                    try:
+                        time.sleep(0.5)
+                        sub_res = requests.get(l, headers=headers, timeout=15)
+                        sub_soup = BeautifulSoup(sub_res.text, 'html.parser')
+                        for sub_a in sub_soup.find_all('a', href=True):
+                            sub_href = sub_a['href'].strip()
+                            sub_target = urljoin(l, sub_href)
+                            if sub_target.endswith('.pdf') and sub_target not in links and sub_target not in sub_links:
+                                sub_links.append(sub_target)
+                    except:
+                        continue
+            links.extend(sub_links)
+            
+    except Exception as e:
+        print(f"リンク収集エラー ({url}): {e}")
+    return links
+
 def check_ministries():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/536.36"
     }
     
     overall_results = {}
-    
-    # --- 集約用のデータ格納リスト ---
-    ex_officials_hits = []      # 元幹部職員の検知結果
-    important_positions_hits = [] # 重要ポジションの検知結果
-    image_pdf_warnings = []     # 画像PDFの警告リスト
+    ex_officials_hits = []      
+    important_positions_hits = [] 
+    image_pdf_warnings = []     
     
     for site_name, url in TARGET_SITES.items():
         print(f"【巡回中】{site_name} をチェックしています...")
         overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
         
-        try:
-            response = requests.get(url, headers=headers, timeout=20)
-            response.encoding = response.apparent_encoding
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            links = []
-            for a_tag in soup.find_all('a', href=True):
-                href = a_tag['href'].strip()
-                if href.endswith('.pdf') or href.endswith('.html') or href.endswith('.htm') or 'jidou' in href or 'jinji' in href or 'meibo' in href or 'kanpou' in url:
-                    if href.startswith('http'): target_url = href
-                    elif href.startswith('/'):
-                        parsed_url = urlparse(url)
-                        target_url = f"{parsed_url.scheme}://{parsed_url.netloc}{href}"
-                    else: target_url = url.rstrip('/') + '/' + href.lstrip('/')
-                    if target_url not in links:
-                        links.append(target_url)
+        # 総務省の場合はワンクッション先（Deep Crawl）を有効化
+        deep_crawl_flag = True if "総務省" in site_name else False
+        links = collect_links_from_url(url, headers, deep_crawl=deep_crawl_flag)
 
-            pdf_checked_count = 0
-            hits_in_site = 0
-            
-            for target_url in links:
-                if not (target_url.endswith('.pdf') or 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url):
-                    continue
-                    
-                try:
-                    res = requests.get(target_url, headers=headers, timeout=20)
-                    if res.status_code != 200: continue
-                    
-                    pdf_checked_count += 1
-                    raw_text = ""
-                    is_image_pdf = False
-                    
-                    if target_url.endswith('.pdf'):
-                        with pdfplumber.open(io.BytesIO(res.content)) as pdf:
-                            raw_text = "".join([page.extract_text(layout=True) or "" for page in pdf.pages])
+        pdf_checked_count = 0
+        hits_in_site = 0
+        
+        for target_url in links:
+            # 最終検証対象はPDF、官報、または時事公報
+            if not (target_url.endswith('.pdf') or 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url):
+                continue
+                
+            try:
+                res = requests.get(target_url, headers=headers, timeout=20)
+                if res.status_code != 200: continue
+                
+                pdf_checked_count += 1
+                raw_text = ""
+                is_image_pdf = False
+                
+                if target_url.endswith('.pdf'):
+                    with pdfplumber.open(io.BytesIO(res.content)) as pdf:
+                        # 1. 通常のテキスト抽出
+                        raw_text = "".join([page.extract_text(layout=True) or "" for page in pdf.pages])
                         
-                        if len(res.content) > 50000 and len(raw_text.strip()) < 10:
-                            is_image_pdf = True
-                    else:
-                        html_soup = BeautifulSoup(res.text, 'html.parser')
-                        raw_text = html_soup.get_text()
+                        # 2. 農林水産省などの縦書き対策（通常抽出で文字が取れない、または農水省の場合）
+                        if "農林水産省" in site_name or (len(raw_text.strip()) < 20 and len(pdf.pages) > 0):
+                            v_text = extract_vertical_text(pdf.pages)
+                            if len(v_text.strip()) > len(raw_text.strip()):
+                                raw_text = v_text # 縦書き抽出結果を採用
                     
-                    cleaned_pdf_text = clean_text(raw_text)
-                    
-                    if not is_image_pdf:
-                        for member in WATCH_DATA:
-                            cleaned_name = clean_text(member["name"])
-                            if not cleaned_name: continue
-                                
-                            if is_member_in_pdf(cleaned_name, raw_text, cleaned_pdf_text):
-                                hit_info = {
-                                    "name": member["name"],
-                                    "site_name": site_name,
-                                    "agency": member["agency"],
-                                    "memo": member["memo"],
-                                    "url": target_url
-                                }
-                                
-                                # 分類してリストに追加（重複排除）
-                                if member["type"] == "【元幹部職員の異動検知】":
-                                    if hit_info not in ex_officials_hits:
-                                        ex_officials_hits.append(hit_info)
-                                        hits_in_site += 1
-                                else:
-                                    if hit_info not in important_positions_hits:
-                                        important_positions_hits.append(hit_info)
-                                        hits_in_site += 1
-                    
-                    if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
-                        warn_info = {"site_name": site_name, "url": target_url}
-                        if warn_info not in image_pdf_warnings:
-                            image_pdf_warnings.append(warn_info)
-                        overall_results[site_name]['details'].append(f"画像PDF検出: {target_url}")
-                        continue
-
-                    if hits_in_site > 0:
-                        overall_results[site_name]['details'].append(f"該当者検知情報をログに記録しました: {target_url}")
+                    if len(res.content) > 50000 and len(raw_text.strip()) < 10:
+                        is_image_pdf = True
+                else:
+                    html_soup = BeautifulSoup(res.text, 'html.parser')
+                    raw_text = html_soup.get_text()
+                
+                cleaned_pdf_text = clean_text(raw_text)
+                
+                if not is_image_pdf:
+                    for member in WATCH_DATA:
+                        cleaned_name = clean_text(member["name"])
+                        if not cleaned_name: continue
                             
-                except Exception as file_error:
+                        if is_member_in_pdf(cleaned_name, raw_text, cleaned_pdf_text):
+                            # 新しい所属のヒント（周辺テキスト）を取得
+                            new_position_hint = get_surrounding_context(member["name"], raw_text)
+                            
+                            hit_info = {
+                                "name": member["name"],
+                                "site_name": site_name,
+                                "agency": member["agency"],
+                                "memo": member["memo"],
+                                "url": target_url,
+                                "new_position": new_position_hint  # 新所属情報を追加
+                            }
+                            
+                            if member["type"] == "【元幹部職員の異動検知】":
+                                if not any(h['name'] == hit_info['name'] and h['url'] == hit_info['url'] for h in ex_officials_hits):
+                                    ex_officials_hits.append(hit_info)
+                                    hits_in_site += 1
+                            else:
+                                if not any(h['name'] == hit_info['name'] and h['url'] == hit_info['url'] for h in important_positions_hits):
+                                    important_positions_hits.append(hit_info)
+                                    hits_in_site += 1
+                
+                if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
+                    warn_info = {"site_name": site_name, "url": target_url}
+                    if warn_info not in image_pdf_warnings:
+                        image_pdf_warnings.append(warn_info)
+                    overall_results[site_name]['details'].append(f"画像PDF検出: {target_url}")
                     continue
-            
-            overall_results[site_name]["status"] = "正常巡回完了"
-            overall_results[site_name]["summary"] = f"検証PDF数: {pdf_checked_count}件 / ヒット数: {hits_in_site}件"
-            time.sleep(1)
+
+                if hits_in_site > 0:
+                    overall_results[site_name]['details'].append(f"該当者検知情報をログに記録しました: {target_url}")
                         
-        except Exception as e:
-            print(f"【エラー】{site_name}のチェック中にエラー: {e}")
-            overall_results[site_name]["status"] = f"エラー発生: {e}"
+            except Exception as file_error:
+                continue
+        
+        overall_results[site_name]["status"] = "正常巡回完了"
+        overall_results[site_name]["summary"] = f"検証PDF数: {pdf_checked_count}件 / ヒット数: {hits_in_site}件"
+        time.sleep(1)
 
     # ================= 3. 集約メールの送信 =================
     
-    # ---- ① 元幹部職員の異動検知メール (人名ソート) ----
+    # ---- ① 元幹部職員の異動検知メール ----
     if ex_officials_hits:
-        ex_officials_hits.sort(key=lambda x: x["name"]) # 人名でソート
+        ex_officials_hits.sort(key=lambda x: x["name"])
         subject = "【元幹部職員の異動検知】人事異動集約報告"
         body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
         for h in ex_officials_hits:
             body += f"■ 氏名: {h['name']}\n"
             body += f"  ・ 発信元: {h['site_name']}\n"
             body += f"  ・ 現想定所属: {h['agency']}\n"
+            body += f"  ・ 新所属(周辺テキスト): {h['new_position']}\n"  # メールに追加
             body += f"  ・ 備考: {h['memo']}\n"
             body += f"  ・ 掲載リンク: {h['url']}\n\n"
         body += "※このメールは自動監視エージェントから送信されています。"
         send_email(subject, body)
 
-    # ---- ② 要監視重要ポジションの異動検知メール (人名ソート) ----
+    # ---- ② 要監視重要ポジションの異動検知メール ----
     if important_positions_hits:
-        important_positions_hits.sort(key=lambda x: x["name"]) # 人名でソート
+        important_positions_hits.sort(key=lambda x: x["name"])
         subject = "【要監視重要ポジションの異動検知】人事異動集約報告"
         body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
         for h in important_positions_hits:
             body += f"■ 氏名: {h['name']}\n"
             body += f"  ・ 発信元: {h['site_name']}\n"
             body += f"  ・ 現想定所属: {h['agency']}\n"
+            body += f"  ・ 新所属(周辺テキスト): {h['new_position']}\n"  # メールに追加
             body += f"  ・ 備考: {h['memo']}\n"
             body += f"  ・ 掲載リンク: {h['url']}\n\n"
         body += "※このメールは自動監視エージェントから送信されています。"
         send_email(subject, body)
 
-    # ---- ③ 画像PDF警告メールの一括送信 (該当がある場合のみ) ----
+    # ---- ③ 画像PDF警告メールの一括送信 ----
     if image_pdf_warnings:
         subject = "【要手動確認・画像PDF検出一括報告】"
         body = (
