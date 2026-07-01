@@ -364,4 +364,5 @@ def check_ministries():
     print("【報告】定期生存報告メールを送信します...")
     send_email(report_subject, report_body)
 
-if __name
+if __name__ == "__main__":
+    check_ministries()
