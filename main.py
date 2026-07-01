@@ -8,6 +8,7 @@ import csv
 from email.mime.text import MIMEText
 from email.utils import formatdate
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urljoin
 
 # ================= 1. 監視対象名簿データの構築 =================
@@ -16,7 +17,6 @@ CSV_IMPORTANT_POSITIONS = "重要ポジション.csv"
 
 def load_watch_data():
     combined_data = []
-    # ---- ① 元幹部職員リストの読み込み ----
     try:
         with open(CSV_EX_OFFICIALS, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
@@ -31,7 +31,6 @@ def load_watch_data():
                 })
     except Exception as e: print(f"CSVエラー1: {e}")
 
-    # ---- ② 要監視重要ポジションの読み込み ----
     try:
         with open(CSV_IMPORTANT_POSITIONS, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
@@ -90,6 +89,28 @@ def clean_text(text):
     if not text: return ""
     return re.sub(r'\s+', '', text).replace(' ', '')
 
+def parse_pdf_date(date_str):
+    """PDFの特殊な日付フォーマット(D:YYYYMMDDHHMMSS...)を通常のdatetimeオブジェクトに変換する"""
+    if not date_str:
+        return None
+    # 不要な文字を削る
+    clean_str = date_str.replace("D:", "").replace("'", "").replace("Z", "")
+    # 前方の数字（年月日と時分秒）だけを抽出 (例: 20250401123000)
+    match = re.match(r'^(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?(\d{2})?', clean_str)
+    if match:
+        g = match.groups()
+        year = int(g[0])
+        month = int(g[1])
+        day = int(g[2])
+        hour = int(g[3]) if g[3] else 0
+        minute = int(g[4]) if g[4] else 0
+        second = int(g[5]) if g[5] else 0
+        try:
+            return datetime(year, month, day, hour, minute, second)
+        except ValueError:
+            return None
+    return None
+
 def extract_vertical_text_from_page(page):
     """単一の縦書きPDFページをテキスト化する"""
     words = page.extract_words()
@@ -110,7 +131,6 @@ def get_surrounding_context(name, raw_text):
     return "周辺情報の取得失敗"
 
 def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
-    """テキスト内に指定された名前が存在するか判定する（スペース調整対応版）"""
     if cleaned_name in cleaned_text_data:
         return True
     chars = [c for c in cleaned_name if c.strip()]
@@ -131,7 +151,6 @@ def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
     return False
 
 def collect_links_from_url(url, headers, deep_crawl=False):
-    """指定したURLから検証対象のリンクを収集する"""
     links = []
     try:
         res = requests.get(url, headers=headers, timeout=20)
@@ -168,7 +187,6 @@ def collect_links_from_url(url, headers, deep_crawl=False):
     return links
 
 def build_grouped_email_body(hits_dict):
-    """人物ごとに情報をとりまとめてメール本文を作成する"""
     body = ""
     for name in sorted(hits_dict.keys()):
         info = hits_dict[name]
@@ -188,6 +206,9 @@ def check_ministries():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/536.36"
     }
+    
+    # 基準となる「1年前（365日前）」の日時を計算
+    one_year_ago = datetime.now() - timedelta(days=365)
     
     overall_results = {}
     ex_officials_hits = {}       
@@ -212,16 +233,27 @@ def check_ministries():
                 res = requests.get(target_url, headers=headers, timeout=20)
                 if res.status_code != 200: continue
                 
-                pdf_checked_count += 1
-                pages_data = [] # 各ページのテキスト情報を格納するリスト [(ページ番号, 生テキスト, クリーニングテキスト)]
+                pages_data = [] 
                 is_image_pdf = False
                 
                 if target_url.endswith('.pdf'):
                     with pdfplumber.open(io.BytesIO(res.content)) as pdf:
+                        # ---- 直近1年以内のPDFかメタデータで確認 ----
+                        meta = pdf.metadata or {}
+                        # 更新日時(ModDate)を最優先、なければ作成日時(CreationDate)を見る
+                        pdf_date_str = meta.get('ModDate') or meta.get('CreationDate')
+                        pdf_date = parse_pdf_date(pdf_date_str)
+                        
+                        if pdf_date and pdf_date < one_year_ago:
+                            # 1年以上前の古いPDFならスキップして次のURLへ
+                            overall_results[site_name]['details'].append(f"古いPDFのためスキップ (更新日: {pdf_date.strftime('%Y-%m-%d')}): {target_url}")
+                            continue
+                        
+                        # 通常のテキスト解析へ進む
+                        pdf_checked_count += 1
                         for idx, page in enumerate(pdf.pages, 1):
                             page_raw = page.extract_text(layout=True) or ""
                             
-                            # 農水省や、文字が引けない場合は縦書き抽出を試みる
                             if "農林水産省" in site_name or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0):
                                 v_text = extract_vertical_text_from_page(page)
                                 if len(v_text.strip()) > len(page_raw.strip()):
@@ -229,12 +261,12 @@ def check_ministries():
                                     
                             pages_data.append((str(idx), page_raw, clean_text(page_raw)))
                         
-                        # 全体の文字数が極端に少ない場合は画像PDF判定
                         total_raw_len = sum(len(p[1].strip()) for p in pages_data)
                         if len(res.content) > 50000 and total_raw_len < 10:
                             is_image_pdf = True
                 else:
-                    # HTMLの場合（官報・時事公報など）はページ番号概念がないため " - " とする
+                    # HTMLページ（官報や時事公報など）はそのまま処理
+                    pdf_checked_count += 1
                     html_soup = BeautifulSoup(res.text, 'html.parser')
                     html_text = html_soup.get_text()
                     pages_data.append(("-", html_text, clean_text(html_text)))
@@ -244,7 +276,6 @@ def check_ministries():
                         cleaned_name = clean_text(member["name"])
                         if not cleaned_name: continue
                         
-                        # ページごとに人名が含まれているか精査
                         for page_num, raw_text, cleaned_pdf_text in pages_data:
                             if is_member_in_text(cleaned_name, raw_text, cleaned_pdf_text):
                                 new_position_hint = get_surrounding_context(member["name"], raw_text)
@@ -265,7 +296,6 @@ def check_ministries():
                                         "sources": []
                                     }
                                 
-                                # 同一URLかつ同一ページでの重複登録を防ぎつつ追加
                                 if not any(s['url'] == target_url and s['page'] == source_detail['page'] for s in target_dict[member["name"]]['sources']):
                                     target_dict[member["name"]]['sources'].append(source_detail)
                                     hits_in_site += 1
@@ -284,12 +314,10 @@ def check_ministries():
                 continue
         
         overall_results[site_name]["status"] = "正常巡回完了"
-        overall_results[site_name]["summary"] = f"検証PDF数: {pdf_checked_count}件 / ヒット数: {hits_in_site}件"
+        overall_results[site_name]["summary"] = f"検証対象数: {pdf_checked_count}件 / ヒット数: {hits_in_site}件"
         time.sleep(1)
 
     # ================= 3. 集約メールの送信 =================
-    
-    # ---- ① 元幹部職員の異動検知メール ----
     if ex_officials_hits:
         subject = "【元幹部職員の異動検知】人事異動集約報告"
         body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
@@ -297,7 +325,6 @@ def check_ministries():
         body += "※このメールは自動監視エージェントから送信されています。"
         send_email(subject, body)
 
-    # ---- ② 要監視重要ポジションの異動検知メール ----
     if important_positions_hits:
         subject = "【要監視重要ポジションの異動検知】人事異動集約報告"
         body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
@@ -305,7 +332,6 @@ def check_ministries():
         body += "※このメールは自動監視エージェントから送信されています。"
         send_email(subject, body)
 
-    # ---- ③ 画像PDF警告メールの一括送信 ----
     if image_pdf_warnings:
         subject = "【要手動確認・画像PDF検出一括報告】"
         body = (
@@ -338,5 +364,4 @@ def check_ministries():
     print("【報告】定期生存報告メールを送信します...")
     send_email(report_subject, report_body)
 
-if __name__ == "__main__":
-    check_ministries()
+if __name
