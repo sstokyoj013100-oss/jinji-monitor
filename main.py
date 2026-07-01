@@ -56,7 +56,6 @@ TO_ADDRESS = "sstokyoj@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
 GMAIL_APP_PASSWORD = "qdfy qhwd bssx ptca"
 
-# 消防庁・水産庁を調査対象から除外
 TARGET_SITES = {
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
@@ -96,12 +95,8 @@ def extract_vertical_text(pdf_pages):
     full_text = ""
     for page in pdf_pages:
         words = page.extract_words()
-        # 縦書きは右から左、上から下に読まれることが多いため、x0(右側ほど大きく、左ほど小さい)とtopでソートを試みる
-        # 簡易的に、大まかな列ごとにグループ化して上から下に結合
         if not words:
             continue
-        # x0の降順（右から左）、かつ同じ列ならtopの昇順（上から下）
-        # ただし単純ソートだとズレるため、x座標を10px単位で丸めて列を作る
         words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
         page_text = "".join([w['text'] for w in words_sorted])
         full_text += page_text + "\n"
@@ -109,7 +104,7 @@ def extract_vertical_text(pdf_pages):
 
 def get_surrounding_context(name, raw_text):
     """人名の周辺テキスト（新所属などのヒント）を抽出する"""
-    cleaned_raw = re.sub(r'\s+', ' ', raw_text) # 改行をスペースに置換して1行にする
+    cleaned_raw = re.sub(r'\s+', ' ', raw_text)
     match = re.search(re.escape(name), cleaned_raw)
     if match:
         start = max(0, match.start() - 60)
@@ -139,7 +134,7 @@ def is_member_in_pdf(cleaned_name, raw_pdf_text, cleaned_pdf_text):
     return False
 
 def collect_links_from_url(url, headers, deep_crawl=False):
-    """指定したURLから検証対象のリンクを収集する（urljoinで不具合対策）"""
+    """指定したURLから検証対象のリンクを収集する"""
     links = []
     try:
         res = requests.get(url, headers=headers, timeout=20)
@@ -148,20 +143,17 @@ def collect_links_from_url(url, headers, deep_crawl=False):
         
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href'].strip()
-            # urljoinを使い、相対パス（./meibo/ や /about/）を正確な絶対URLに変換
             target_url = urljoin(url, href)
             
-            # 条件に合致するリンクを収集
             if href.endswith('.pdf') or href.endswith('.html') or href.endswith('.htm') or 'jidou' in href or 'jinji' in href or 'meibo' in href or 'kanpou' in url:
                 if target_url not in links:
                     links.append(target_url)
                     
-        # 総務省などの「ワンクッション先の中ページ」も追跡する設定の場合
+        # 深層巡回（総務省、経済産業省、文部科学省に対応）
         if deep_crawl:
             sub_links = []
             for l in links:
-                # htmlページかつ、人事や移動に関わりそうな中ページであればもう1階層掘る
-                if (l.endswith('.html') or l.endswith('.htm')) and ('jinji' in l or 'sosiki' in l or 'meibo' in l):
+                if (l.endswith('.html') or l.endswith('.htm')) and ('jinji' in l or 'sosiki' in l or 'meibo' in l or 'saiyou' in l or 'b_menu' in l):
                     try:
                         time.sleep(0.5)
                         sub_res = requests.get(l, headers=headers, timeout=15)
@@ -179,29 +171,49 @@ def collect_links_from_url(url, headers, deep_crawl=False):
         print(f"リンク収集エラー ({url}): {e}")
     return links
 
+def build_grouped_email_body(hits_dict):
+    """人物ごとに情報をとりまとめてメール本文を作成する"""
+    body = ""
+    # 人名でソートしてループ
+    for name in sorted(hits_dict.keys()):
+        info = hits_dict[name]
+        body += f"■ 氏名: {name}\n"
+        body += f"  ・ 現想定所属: {info['agency']}\n"
+        body += f"  ・ 備考: {info['memo']}\n"
+        body += f"  ・ 検知ソース（複数箇所で検知された場合は全て列挙）:\n"
+        
+        # 該当人物が検知された場所をすべて書き出す
+        for i, src in enumerate(info['sources'], 1):
+            body += f"    [{i}] 発信元: {src['site_name']}\n"
+            body += f"        新所属(周辺テキスト): {src['new_position']}\n"
+            body += f"        掲載リンク: {src['url']}\n"
+        body += "\n"
+    return body
+
 def check_ministries():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/536.36"
     }
     
     overall_results = {}
-    ex_officials_hits = []      
-    important_positions_hits = [] 
+    
+    # 人物ごとに格納するための辞書構造に変更
+    ex_officials_hits = {}       # 元幹部用 { "人名": { "agency":..., "memo":..., "sources": [...] } }
+    important_positions_hits = {} # 重要ポジション用
     image_pdf_warnings = []     
     
     for site_name, url in TARGET_SITES.items():
         print(f"【巡回中】{site_name} をチェックしています...")
         overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
         
-        # 総務省の場合はワンクッション先（Deep Crawl）を有効化
-        deep_crawl_flag = True if "総務省" in site_name else False
+        # 総務省、経産省、文科省はワンクッション先まで探す(Deep Crawl)
+        deep_crawl_flag = True if site_name in ["総務省(人事・組織)", "経済産業省", "文部科学省(幹部名簿)"] else False
         links = collect_links_from_url(url, headers, deep_crawl=deep_crawl_flag)
 
         pdf_checked_count = 0
         hits_in_site = 0
         
         for target_url in links:
-            # 最終検証対象はPDF、官報、または時事公報
             if not (target_url.endswith('.pdf') or 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url):
                 continue
                 
@@ -215,14 +227,12 @@ def check_ministries():
                 
                 if target_url.endswith('.pdf'):
                     with pdfplumber.open(io.BytesIO(res.content)) as pdf:
-                        # 1. 通常のテキスト抽出
                         raw_text = "".join([page.extract_text(layout=True) or "" for page in pdf.pages])
                         
-                        # 2. 農林水産省などの縦書き対策（通常抽出で文字が取れない、または農水省の場合）
                         if "農林水産省" in site_name or (len(raw_text.strip()) < 20 and len(pdf.pages) > 0):
                             v_text = extract_vertical_text(pdf.pages)
                             if len(v_text.strip()) > len(raw_text.strip()):
-                                raw_text = v_text # 縦書き抽出結果を採用
+                                raw_text = v_text
                     
                     if len(res.content) > 50000 and len(raw_text.strip()) < 10:
                         is_image_pdf = True
@@ -238,26 +248,30 @@ def check_ministries():
                         if not cleaned_name: continue
                             
                         if is_member_in_pdf(cleaned_name, raw_text, cleaned_pdf_text):
-                            # 新しい所属のヒント（周辺テキスト）を取得
                             new_position_hint = get_surrounding_context(member["name"], raw_text)
                             
-                            hit_info = {
-                                "name": member["name"],
+                            # 登録用データ構造の作成
+                            source_detail = {
                                 "site_name": site_name,
-                                "agency": member["agency"],
-                                "memo": member["memo"],
                                 "url": target_url,
-                                "new_position": new_position_hint  # 新所属情報を追加
+                                "new_position": new_position_hint
                             }
                             
-                            if member["type"] == "【元幹部職員の異動検知】":
-                                if not any(h['name'] == hit_info['name'] and h['url'] == hit_info['url'] for h in ex_officials_hits):
-                                    ex_officials_hits.append(hit_info)
-                                    hits_in_site += 1
-                            else:
-                                if not any(h['name'] == hit_info['name'] and h['url'] == hit_info['url'] for h in important_positions_hits):
-                                    important_positions_hits.append(hit_info)
-                                    hits_in_site += 1
+                            # 分類先辞書の決定
+                            target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
+                            
+                            # 初めてヒットした人物ならベースを作成
+                            if member["name"] not in target_dict:
+                                target_dict[member["name"]] = {
+                                    "agency": member["agency"],
+                                    "memo": member["memo"],
+                                    "sources": []
+                                }
+                            
+                            # 同一URLでの重複登録を防ぎつつ、ソース情報を追加
+                            if not any(s['url'] == target_url for s in target_dict[member["name"]]['sources']):
+                                target_dict[member["name"]]['sources'].append(source_detail)
+                                hits_in_site += 1
                 
                 if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
                     warn_info = {"site_name": site_name, "url": target_url}
@@ -278,33 +292,19 @@ def check_ministries():
 
     # ================= 3. 集約メールの送信 =================
     
-    # ---- ① 元幹部職員の異動検知メール ----
+    # ---- ① 元幹部職員の異動検知メール (人物ごとにとりまとめ) ----
     if ex_officials_hits:
-        ex_officials_hits.sort(key=lambda x: x["name"])
         subject = "【元幹部職員の異動検知】人事異動集約報告"
         body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
-        for h in ex_officials_hits:
-            body += f"■ 氏名: {h['name']}\n"
-            body += f"  ・ 発信元: {h['site_name']}\n"
-            body += f"  ・ 現想定所属: {h['agency']}\n"
-            body += f"  ・ 新所属(周辺テキスト): {h['new_position']}\n"  # メールに追加
-            body += f"  ・ 備考: {h['memo']}\n"
-            body += f"  ・ 掲載リンク: {h['url']}\n\n"
+        body += build_grouped_email_body(ex_officials_hits)
         body += "※このメールは自動監視エージェントから送信されています。"
         send_email(subject, body)
 
-    # ---- ② 要監視重要ポジションの異動検知メール ----
+    # ---- ② 要監視重要ポジションの異動検知メール (人物ごとにとりまとめ) ----
     if important_positions_hits:
-        important_positions_hits.sort(key=lambda x: x["name"])
         subject = "【要監視重要ポジションの異動検知】人事異動集約報告"
         body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
-        for h in important_positions_hits:
-            body += f"■ 氏名: {h['name']}\n"
-            body += f"  ・ 発信元: {h['site_name']}\n"
-            body += f"  ・ 現想定所属: {h['agency']}\n"
-            body += f"  ・ 新所属(周辺テキスト): {h['new_position']}\n"  # メールに追加
-            body += f"  ・ 備考: {h['memo']}\n"
-            body += f"  ・ 掲載リンク: {h['url']}\n\n"
+        body += build_grouped_email_body(important_positions_hits)
         body += "※このメールは自動監視エージェントから送信されています。"
         send_email(subject, body)
 
