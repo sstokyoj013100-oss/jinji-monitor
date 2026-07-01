@@ -15,6 +15,11 @@ from urllib.parse import urlparse, urljoin
 CSV_EX_OFFICIALS = "元幹部リスト.csv"
 CSV_IMPORTANT_POSITIONS = "重要ポジション.csv"
 
+def clean_text(text):
+    """テキストからすべての空白・改行（全角半角含む）を完全に除去する"""
+    if not text: return ""
+    return re.sub(r'\s+', '', str(text)).replace(' ', '').replace(' ', '')
+
 def load_watch_data():
     combined_data = []
     try:
@@ -25,6 +30,7 @@ def load_watch_data():
                 if not name: continue
                 combined_data.append({
                     "name": name,
+                    "key_name": clean_text(name), # スペースを完全除去した照合・統合用キー
                     "agency": row.get("agency", "").strip() or row.get("省庁", "不明"),
                     "memo": f"元下関市: {row.get('shimonoseki_title', '').strip() or row.get('元下関役職', 'データなし')}",
                     "type": "【元幹部職員の異動検知】"
@@ -41,6 +47,7 @@ def load_watch_data():
                 title = row.get("希望先役職", "").strip()
                 combined_data.append({
                     "name": name,
+                    "key_name": clean_text(name), # スペースを完全除去した照合・統合用キー
                     "agency": row.get("省庁", "不明").strip(),
                     "memo": f"重要ポジション（前職想定: {dept} {title}）",
                     "type": "【要監視重要ポジションの異動検知】"
@@ -64,7 +71,8 @@ TARGET_SITES = {
     "こども家庭庁(人事)": "https://www.cfa.go.jp/about/jinji",
     "文部科学省(幹部名簿)": "https://www.mext.go.jp/b_menu/soshiki2/kanbumeibo.htm",
     "復興庁(人事)": "https://www.reconstruction.go.jp/topics/cat-114/jinji/",
-    "経済産業省": "https://www.meti.go.jp/annai/saiyou/jinji/index.html",
+    "経済産業省(人事・採用)": "https://www.meti.go.jp/annai/saiyou/jinji/index.html",
+    "経済産業省(幹部名簿)": "https://www.meti.go.jp/intro/data/index_leaders.html", # ←新しく検証ルートに追加
     "時事公報(人事ニュース)": "https://www.jihyo.co.jp/jinji_news/",
     "インターネット官報": "https://kanpou.npb.go.jp/"
 }
@@ -84,10 +92,6 @@ def send_email(subject, body):
         print(f"メール送信成功: {subject}")
     except Exception as e:
         print(f"メール送信失敗: {e}")
-
-def clean_text(text):
-    if not text: return ""
-    return re.sub(r'\s+', '', text).replace(' ', '')
 
 def parse_pdf_date(date_str):
     if not date_str:
@@ -116,8 +120,12 @@ def extract_vertical_text_from_page(page):
     return "".join([w['text'] for w in words_sorted])
 
 def get_surrounding_context(name, raw_text):
+    """人名の周辺テキストを抽出する（スペース違いに対応するため、元々のマッチングロジックを工夫）"""
+    # 検索用として、スペースを1つに丸めた状態にする
     cleaned_raw = re.sub(r'\s+', ' ', raw_text)
-    match = re.search(re.escape(name), cleaned_raw)
+    # 苗字と名前の間に任意のスペースを許容する正規表現を作成
+    pattern = ".*".join([re.escape(c) for c in name if c.strip()])
+    match = re.search(pattern, cleaned_raw)
     if match:
         start = max(0, match.start() - 60)
         end = min(len(cleaned_raw), match.end() + 60)
@@ -163,7 +171,7 @@ def collect_links_from_url(url, headers, deep_crawl=False):
         if deep_crawl:
             sub_links = []
             for l in links:
-                if (l.endswith('.html') or l.endswith('.htm')) and ('jinji' in l or 'sosiki' in l or 'meibo' in l or 'saiyou' in l or 'b_menu' in l):
+                if (l.endswith('.html') or l.endswith('.htm')) and ('jinji' in l or 'sosiki' in l or 'meibo' in l or 'saiyou' in l or 'b_menu' in l or 'intro' in l):
                     try:
                         time.sleep(0.5)
                         sub_res = requests.get(l, headers=headers, timeout=15)
@@ -183,9 +191,10 @@ def collect_links_from_url(url, headers, deep_crawl=False):
 
 def build_grouped_email_body(hits_dict):
     body = ""
-    for name in sorted(hits_dict.keys()):
-        info = hits_dict[name]
-        body += f"■ 氏名: {name}\n"
+    # 統合されたスペースなしキーでループするが、表示は綺麗な登録名(display_name)を使う
+    for key_name in sorted(hits_dict.keys()):
+        info = hits_dict[key_name]
+        body += f"■ 氏名: {info['display_name']}\n"
         body += f"  ・ 現想定所属: {info['agency']}\n"
         body += f"  ・ 備考: {info['memo']}\n"
         body += f"  ・ 検知ソース:\n"
@@ -202,7 +211,8 @@ def check_ministries():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/536.36"
     }
     
-    one_year_ago = datetime.now() - timedelta(days=365)
+    # ★検証期間を「6ヶ月（180日）」に短縮
+    six_months_ago = datetime.now() - timedelta(days=180)
     
     overall_results = {}
     ex_officials_hits = {}       
@@ -213,10 +223,10 @@ def check_ministries():
         print(f"【巡回中】{site_name} をチェックしています...")
         overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
         
-        deep_crawl_flag = True if site_name in ["総務省(人事・組織)", "経済産業省", "文部科学省(幹部名簿)"] else False
+        # 総務省、経産省、文科省はDeep Crawlを適用
+        deep_crawl_flag = True if "総務省" in site_name or "経済産業省" in site_name or "文部科学省" in site_name else False
         links = collect_links_from_url(url, headers, deep_crawl=deep_crawl_flag)
 
-        # トップページ（url自体）も検証対象に含める（HTML直書き対策）
         if url not in links:
             links.insert(0, url)
 
@@ -224,7 +234,6 @@ def check_ministries():
         hits_in_site = 0
         
         for target_url in links:
-            # 検証対象の絞り込み（PDF、HTML、官報、時事公報）
             if not (target_url.endswith('.pdf') or target_url.endswith('.html') or target_url.endswith('.htm') or 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url):
                 continue
                 
@@ -241,7 +250,8 @@ def check_ministries():
                         pdf_date_str = meta.get('ModDate') or meta.get('CreationDate')
                         pdf_date = parse_pdf_date(pdf_date_str)
                         
-                        if pdf_date and pdf_date < one_year_ago:
+                        # ★6ヶ月より古いPDFはスキップ
+                        if pdf_date and pdf_date < six_months_ago:
                             overall_results[site_name]['details'].append(f"古いPDFのためスキップ (更新日: {pdf_date.strftime('%Y-%m-%d')}): {target_url}")
                             continue
                         
@@ -260,20 +270,17 @@ def check_ministries():
                         if len(res.content) > 50000 and total_raw_len < 10:
                             is_image_pdf = True
                 else:
-                    # HTMLページ（文科省等のホームページ上のテキスト）を解析
                     checked_count += 1
                     html_soup = BeautifulSoup(res.text, 'html.parser')
-                    
-                    # 不要なナビゲーションやフッターを簡易的に除外して本文テキストを取得
                     for s in html_soup(['script', 'style', 'nav', 'footer']):
                         s.decompose()
                     html_text = html_soup.get_text()
-                    
                     pages_data.append(("-", html_text, clean_text(html_text)))
                 
                 if not is_image_pdf:
                     for member in WATCH_DATA:
-                        cleaned_name = clean_text(member["name"])
+                        # 判定にはスペースなしの key_name を使用
+                        cleaned_name = member["key_name"]
                         if not cleaned_name: continue
                         
                         for page_num, raw_text, cleaned_pdf_text in pages_data:
@@ -289,15 +296,17 @@ def check_ministries():
                                 
                                 target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
                                 
-                                if member["name"] not in target_dict:
-                                    target_dict[member["name"]] = {
+                                # ★スペースなしの「key_name」をキーにして人物を特定・統合
+                                if cleaned_name not in target_dict:
+                                    target_dict[cleaned_name] = {
+                                        "display_name": member["name"], # 最初に見つかった表記をメール表示用に保持
                                         "agency": member["agency"],
                                         "memo": member["memo"],
                                         "sources": []
                                     }
                                 
-                                if not any(s['url'] == target_url and s['page'] == source_detail['page'] for s in target_dict[member["name"]]['sources']):
-                                    target_dict[member["name"]]['sources'].append(source_detail)
+                                if not any(s['url'] == target_url and s['page'] == source_detail['page'] for s in target_dict[cleaned_name]['sources']):
+                                    target_dict[cleaned_name]['sources'].append(source_detail)
                                     hits_in_site += 1
                 
                 if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
