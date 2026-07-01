@@ -321,4 +321,83 @@ def check_ministries():
                                     "recent_24h": is_src_recent_24h # 24時間以内フラグをソース情報に持たせる
                                 }
                                 
-                                target_dict = ex_officials_hits
+                                target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
+                                
+                                if cleaned_name not in target_dict:
+                                    target_dict[cleaned_name] = {
+                                        "display_name": member["name"],
+                                        "agency": member["agency"],
+                                        "memo": member["memo"],
+                                        "sources": []
+                                    }
+                                
+                                if not any(s['url'] == target_url and s['page'] == source_detail['page'] for s in target_dict[cleaned_name]['sources']):
+                                    target_dict[cleaned_name]['sources'].append(source_detail)
+                                    hits_in_site += 1
+                
+                if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
+                    warn_info = {"site_name": site_name, "url": target_url}
+                    if warn_info not in image_pdf_warnings:
+                        image_pdf_warnings.append(warn_info)
+                    overall_results[site_name]['details'].append(f"画像PDF検出: {target_url}")
+                    continue
+
+                if hits_in_site > 0:
+                    overall_results[site_name]['details'].append(f"該当者検知情報をログに記録しました: {target_url}")
+                        
+            except Exception as file_error:
+                continue
+        
+        overall_results[site_name]["status"] = "正常巡回完了"
+        overall_results[site_name]["summary"] = f"検証対象数: {checked_count}件 / ヒット数: {hits_in_site}件"
+        time.sleep(1.5)
+
+    # ================= 4. 集約メールの送信 (検知宛先: TO_ADDRESS_DETECT) =================
+    if ex_officials_hits:
+        subject = "【元幹部職員の異動検知】人事異動集約報告"
+        body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
+        body += build_grouped_email_body(ex_officials_hits)
+        body += "※このメールは自動監視エージェントから送信されています。"
+        send_email(subject, body, TO_ADDRESS_DETECT)
+
+    if important_positions_hits:
+        subject = "【要監視重要ポジションの異動検知】人事異動集約報告"
+        body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
+        body += build_grouped_email_body(important_positions_hits)
+        body += "※このメールは自動監視エージェントから送信されています。"
+        send_email(subject, body, TO_ADDRESS_DETECT)
+
+    if image_pdf_warnings:
+        subject = "【要手動確認・画像PDF検出一括報告】"
+        body = (
+            f"※警告: 文字情報が抽出できない「画像化されたPDF」が検出されました。\n"
+            f"該当者が含まれている可能性があるため、手動でご確認ください。\n\n"
+        )
+        for w in image_pdf_warnings:
+            body += f"■ 発信元サイト: {w['site_name']}\n"
+            body += f"■ 対象PDFリンク: {w['url']}\n"
+            body += "----------------------------------------\n"
+        send_email(subject, body, TO_ADDRESS_DETECT)
+
+    # ================= 5. 定期生存報告メールの送信 (定期報告宛先: TO_ADDRESS_REPORTに変更) =================
+    report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
+    report_body = "人事異動の監視プログラムが実行されました。\n各省庁の巡回結果は以下の通りです。\n\n"
+    report_body += "----------------------------------------\n"
+    
+    for site, res in overall_results.items():
+        report_body += f"■ 省庁・サイト名: {site}\n"
+        report_body += f"  ステータス: {res['status']}\n"
+        if "summary" in res:
+            report_body += f"  処理概要: {res['summary']}\n"
+        if res['details']:
+            report_body += "  詳細ログ:\n" + "\n".join([f"    - {d}" for d in res['details']]) + "\n"
+        report_body += "----------------------------------------\n"
+        
+    report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n"
+    report_body += "※このメールはプログラムが正常に動作していることを証明するために自動送信されています。"
+    
+    print("【報告】定期生存報告メールを送信します...")
+    send_email(report_subject, report_body, TO_ADDRESS_REPORT) # ★三浦様のメールアドレスへ送信
+
+if __name__ == "__main__":
+    check_ministries()
