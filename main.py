@@ -8,7 +8,7 @@ import csv
 from email.mime.text import MIMEText
 from email.utils import formatdate
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from urllib.parse import urlparse, urljoin
 
 # ================= 1. 監視対象名簿データの構築 =================
@@ -90,12 +90,9 @@ def clean_text(text):
     return re.sub(r'\s+', '', text).replace(' ', '')
 
 def parse_pdf_date(date_str):
-    """PDFの特殊な日付フォーマット(D:YYYYMMDDHHMMSS...)を通常のdatetimeオブジェクトに変換する"""
     if not date_str:
         return None
-    # 不要な文字を削る
     clean_str = date_str.replace("D:", "").replace("'", "").replace("Z", "")
-    # 前方の数字（年月日と時分秒）だけを抽出 (例: 20250401123000)
     match = re.match(r'^(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?(\d{2})?', clean_str)
     if match:
         g = match.groups()
@@ -112,7 +109,6 @@ def parse_pdf_date(date_str):
     return None
 
 def extract_vertical_text_from_page(page):
-    """単一の縦書きPDFページをテキスト化する"""
     words = page.extract_words()
     if not words:
         return ""
@@ -120,7 +116,6 @@ def extract_vertical_text_from_page(page):
     return "".join([w['text'] for w in words_sorted])
 
 def get_surrounding_context(name, raw_text):
-    """人名の周辺テキスト（新所属などのヒント）を抽出する"""
     cleaned_raw = re.sub(r'\s+', ' ', raw_text)
     match = re.search(re.escape(name), cleaned_raw)
     if match:
@@ -183,186 +178,4 @@ def collect_links_from_url(url, headers, deep_crawl=False):
             links.extend(sub_links)
             
     except Exception as e:
-        print(f"リンク収集エラー ({url}): {e}")
-    return links
-
-def build_grouped_email_body(hits_dict):
-    body = ""
-    for name in sorted(hits_dict.keys()):
-        info = hits_dict[name]
-        body += f"■ 氏名: {name}\n"
-        body += f"  ・ 現想定所属: {info['agency']}\n"
-        body += f"  ・ 備考: {info['memo']}\n"
-        body += f"  ・ 検知ソース:\n"
-        
-        for i, src in enumerate(info['sources'], 1):
-            body += f"    [{i}] 発信元: {src['site_name']} (該当ページ: {src['page']})\n"
-            body += f"        新所属(周辺テキスト): {src['new_position']}\n"
-            body += f"        掲載リンク: {src['url']}\n"
-        body += "\n"
-    return body
-
-def check_ministries():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/536.36"
-    }
-    
-    # 基準となる「1年前（365日前）」の日時を計算
-    one_year_ago = datetime.now() - timedelta(days=365)
-    
-    overall_results = {}
-    ex_officials_hits = {}       
-    important_positions_hits = {} 
-    image_pdf_warnings = []     
-    
-    for site_name, url in TARGET_SITES.items():
-        print(f"【巡回中】{site_name} をチェックしています...")
-        overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
-        
-        deep_crawl_flag = True if site_name in ["総務省(人事・組織)", "経済産業省", "文部科学省(幹部名簿)"] else False
-        links = collect_links_from_url(url, headers, deep_crawl=deep_crawl_flag)
-
-        pdf_checked_count = 0
-        hits_in_site = 0
-        
-        for target_url in links:
-            if not (target_url.endswith('.pdf') or 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url):
-                continue
-                
-            try:
-                res = requests.get(target_url, headers=headers, timeout=20)
-                if res.status_code != 200: continue
-                
-                pages_data = [] 
-                is_image_pdf = False
-                
-                if target_url.endswith('.pdf'):
-                    with pdfplumber.open(io.BytesIO(res.content)) as pdf:
-                        # ---- 直近1年以内のPDFかメタデータで確認 ----
-                        meta = pdf.metadata or {}
-                        # 更新日時(ModDate)を最優先、なければ作成日時(CreationDate)を見る
-                        pdf_date_str = meta.get('ModDate') or meta.get('CreationDate')
-                        pdf_date = parse_pdf_date(pdf_date_str)
-                        
-                        if pdf_date and pdf_date < one_year_ago:
-                            # 1年以上前の古いPDFならスキップして次のURLへ
-                            overall_results[site_name]['details'].append(f"古いPDFのためスキップ (更新日: {pdf_date.strftime('%Y-%m-%d')}): {target_url}")
-                            continue
-                        
-                        # 通常のテキスト解析へ進む
-                        pdf_checked_count += 1
-                        for idx, page in enumerate(pdf.pages, 1):
-                            page_raw = page.extract_text(layout=True) or ""
-                            
-                            if "農林水産省" in site_name or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0):
-                                v_text = extract_vertical_text_from_page(page)
-                                if len(v_text.strip()) > len(page_raw.strip()):
-                                    page_raw = v_text
-                                    
-                            pages_data.append((str(idx), page_raw, clean_text(page_raw)))
-                        
-                        total_raw_len = sum(len(p[1].strip()) for p in pages_data)
-                        if len(res.content) > 50000 and total_raw_len < 10:
-                            is_image_pdf = True
-                else:
-                    # HTMLページ（官報や時事公報など）はそのまま処理
-                    pdf_checked_count += 1
-                    html_soup = BeautifulSoup(res.text, 'html.parser')
-                    html_text = html_soup.get_text()
-                    pages_data.append(("-", html_text, clean_text(html_text)))
-                
-                if not is_image_pdf:
-                    for member in WATCH_DATA:
-                        cleaned_name = clean_text(member["name"])
-                        if not cleaned_name: continue
-                        
-                        for page_num, raw_text, cleaned_pdf_text in pages_data:
-                            if is_member_in_text(cleaned_name, raw_text, cleaned_pdf_text):
-                                new_position_hint = get_surrounding_context(member["name"], raw_text)
-                                
-                                source_detail = {
-                                    "site_name": site_name,
-                                    "url": target_url,
-                                    "page": f"{page_num} ページ" if page_num != "-" else "WEBページ(HTML)",
-                                    "new_position": new_position_hint
-                                }
-                                
-                                target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
-                                
-                                if member["name"] not in target_dict:
-                                    target_dict[member["name"]] = {
-                                        "agency": member["agency"],
-                                        "memo": member["memo"],
-                                        "sources": []
-                                    }
-                                
-                                if not any(s['url'] == target_url and s['page'] == source_detail['page'] for s in target_dict[member["name"]]['sources']):
-                                    target_dict[member["name"]]['sources'].append(source_detail)
-                                    hits_in_site += 1
-                
-                if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
-                    warn_info = {"site_name": site_name, "url": target_url}
-                    if warn_info not in image_pdf_warnings:
-                        image_pdf_warnings.append(warn_info)
-                    overall_results[site_name]['details'].append(f"画像PDF検出: {target_url}")
-                    continue
-
-                if hits_in_site > 0:
-                    overall_results[site_name]['details'].append(f"該当者検知情報をログに記録しました: {target_url}")
-                        
-            except Exception as file_error:
-                continue
-        
-        overall_results[site_name]["status"] = "正常巡回完了"
-        overall_results[site_name]["summary"] = f"検証対象数: {pdf_checked_count}件 / ヒット数: {hits_in_site}件"
-        time.sleep(1)
-
-    # ================= 3. 集約メールの送信 =================
-    if ex_officials_hits:
-        subject = "【元幹部職員の異動検知】人事異動集約報告"
-        body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
-        body += build_grouped_email_body(ex_officials_hits)
-        body += "※このメールは自動監視エージェントから送信されています。"
-        send_email(subject, body)
-
-    if important_positions_hits:
-        subject = "【要監視重要ポジションの異動検知】人事異動集約報告"
-        body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
-        body += build_grouped_email_body(important_positions_hits)
-        body += "※このメールは自動監視エージェントから送信されています。"
-        send_email(subject, body)
-
-    if image_pdf_warnings:
-        subject = "【要手動確認・画像PDF検出一括報告】"
-        body = (
-            f"※警告: 文字情報が抽出できない「画像化されたPDF」が検出されました。\n"
-            f"該当者が含まれている可能性があるため、手動でご確認ください。\n\n"
-        )
-        for w in image_pdf_warnings:
-            body += f"■ 発信元サイト: {w['site_name']}\n"
-            body += f"■ 対象PDFリンク: {w['url']}\n"
-            body += "----------------------------------------\n"
-        send_email(subject, body)
-
-    # ================= 4. 空振り・定期生存報告メールの送信 =================
-    report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
-    report_body = "人事異動の監視プログラムが実行されました。\n各省庁の巡回結果は以下の通りです。\n\n"
-    report_body += "----------------------------------------\n"
-    
-    for site, res in overall_results.items():
-        report_body += f"■ 省庁・サイト名: {site}\n"
-        report_body += f"  ステータス: {res['status']}\n"
-        if "summary" in res:
-            report_body += f"  処理概要: {res['summary']}\n"
-        if res['details']:
-            report_body += "  詳細ログ:\n" + "\n".join([f"    - {d}" for d in res['details']]) + "\n"
-        report_body += "----------------------------------------\n"
-        
-    report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n"
-    report_body += "※このメールはプログラムが正常に動作していることを証明するために自動送信されています。"
-    
-    print("【報告】定期生存報告メールを送信します...")
-    send_email(report_subject, report_body)
-
-if __name__ == "__main__":
-    check_ministries()
+        print(f"リンク収集エラー ({url}): {e
