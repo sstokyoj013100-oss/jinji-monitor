@@ -56,7 +56,6 @@ TO_ADDRESS = "sstokyoj@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
 GMAIL_APP_PASSWORD = "qdfy qhwd bssx ptca"
 
-# ご提示いただいた正確な人事・名簿トップページURLに刷新
 TARGET_SITES = {
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "消防庁": "https://www.fdma.go.jp/pressrelease/jinji/",
@@ -120,6 +119,11 @@ def check_ministries():
     
     overall_results = {}
     
+    # --- 集約用のデータ格納リスト ---
+    ex_officials_hits = []      # 元幹部職員の検知結果
+    important_positions_hits = [] # 重要ポジションの検知結果
+    image_pdf_warnings = []     # 画像PDFの警告リスト
+    
     for site_name, url in TARGET_SITES.items():
         print(f"【巡回中】{site_name} をチェックしています...")
         overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
@@ -132,7 +136,6 @@ def check_ministries():
             links = []
             for a_tag in soup.find_all('a', href=True):
                 href = a_tag['href'].strip()
-                # 抽出条件を緩和：拡張子だけでなく、人事・名簿に関わるリンクやPDFを広く収集
                 if href.endswith('.pdf') or href.endswith('.html') or href.endswith('.htm') or 'jidou' in href or 'jinji' in href or 'meibo' in href or 'kanpou' in url:
                     if href.startswith('http'): target_url = href
                     elif href.startswith('/'):
@@ -146,7 +149,6 @@ def check_ministries():
             hits_in_site = 0
             
             for target_url in links:
-                # 最終検証対象はPDF、官報、または時事公報のニュースURL
                 if not (target_url.endswith('.pdf') or 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url):
                     continue
                     
@@ -169,8 +171,6 @@ def check_ministries():
                         raw_text = html_soup.get_text()
                     
                     cleaned_pdf_text = clean_text(raw_text)
-                    hit_members = []
-                    mail_type = "【人事異動検知】"
                     
                     if not is_image_pdf:
                         for member in WATCH_DATA:
@@ -178,35 +178,33 @@ def check_ministries():
                             if not cleaned_name: continue
                                 
                             if is_member_in_pdf(cleaned_name, raw_text, cleaned_pdf_text):
-                                hit_info = f"{member['name']}（現想定所属: {member['agency']} / 備考: {member['memo']}）"
-                                if hit_info not in hit_members:
-                                    hit_members.append(hit_info)
-                                    mail_type = member["type"]
+                                hit_info = {
+                                    "name": member["name"],
+                                    "site_name": site_name,
+                                    "agency": member["agency"],
+                                    "memo": member["memo"],
+                                    "url": target_url
+                                }
+                                
+                                # 分類してリストに追加（重複排除）
+                                if member["type"] == "【元幹部職員の異動検知】":
+                                    if hit_info not in ex_officials_hits:
+                                        ex_officials_hits.append(hit_info)
+                                        hits_in_site += 1
+                                else:
+                                    if hit_info not in important_positions_hits:
+                                        important_positions_hits.append(hit_info)
+                                        hits_in_site += 1
                     
                     if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
-                        subject = f"【要手動確認・画像PDF検出】{site_name}"
-                        body = (
-                            f"※警告: 文字情報が抽出できない「画像化されたPDF」を検出しました。\n"
-                            f"高橋さん等の該当者が含まれている可能性があるため、手動でご確認ください。\n\n"
-                            f"■ 発信元サイト: {site_name}\n"
-                            f"■ 対象PDFリンク: {target_url}\n"
-                        )
-                        send_email(subject, body)
+                        warn_info = {"site_name": site_name, "url": target_url}
+                        if warn_info not in image_pdf_warnings:
+                            image_pdf_warnings.append(warn_info)
                         overall_results[site_name]['details'].append(f"画像PDF検出: {target_url}")
                         continue
 
-                    if hit_members:
-                        hits_in_site += len(hit_members)
-                        subject = f"{mail_type}{site_name}"
-                        body = (
-                            f"以下の人物に関する人事異動情報を検知しました。\n\n"
-                            f"■ 発信元サイト: {site_name}\n"
-                            f"■ 該当者:\n" + "\n".join([f"  ・ {m}" for m in hit_members]) + "\n"
-                            f"■ 掲載リンク: {target_url}\n\n"
-                            f"※このメールは自動監視エージェントから送信されています。"
-                        )
-                        send_email(subject, body)
-                        overall_results[site_name]['details'].append(f"該当者検知({len(hit_members)}名): {target_url}")
+                    if hits_in_site > 0:
+                        overall_results[site_name]['details'].append(f"該当者検知情報をログに記録しました: {target_url}")
                             
                 except Exception as file_error:
                     continue
@@ -219,7 +217,50 @@ def check_ministries():
             print(f"【エラー】{site_name}のチェック中にエラー: {e}")
             overall_results[site_name]["status"] = f"エラー発生: {e}"
 
-    # ================= 3. 空振り・定期生存報告メールの送信 =================
+    # ================= 3. 集約メールの送信 =================
+    
+    # ---- ① 元幹部職員の異動検知メール (人名ソート) ----
+    if ex_officials_hits:
+        ex_officials_hits.sort(key=lambda x: x["name"]) # 人名でソート
+        subject = "【元幹部職員の異動検知】人事異動集約報告"
+        body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
+        for h in ex_officials_hits:
+            body += f"■ 氏名: {h['name']}\n"
+            body += f"  ・ 発信元: {h['site_name']}\n"
+            body += f"  ・ 現想定所属: {h['agency']}\n"
+            body += f"  ・ 備考: {h['memo']}\n"
+            body += f"  ・ 掲載リンク: {h['url']}\n\n"
+        body += "※このメールは自動監視エージェントから送信されています。"
+        send_email(subject, body)
+
+    # ---- ② 要監視重要ポジションの異動検知メール (人名ソート) ----
+    if important_positions_hits:
+        important_positions_hits.sort(key=lambda x: x["name"]) # 人名でソート
+        subject = "【要監視重要ポジションの異動検知】人事異動集約報告"
+        body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
+        for h in important_positions_hits:
+            body += f"■ 氏名: {h['name']}\n"
+            body += f"  ・ 発信元: {h['site_name']}\n"
+            body += f"  ・ 現想定所属: {h['agency']}\n"
+            body += f"  ・ 備考: {h['memo']}\n"
+            body += f"  ・ 掲載リンク: {h['url']}\n\n"
+        body += "※このメールは自動監視エージェントから送信されています。"
+        send_email(subject, body)
+
+    # ---- ③ 画像PDF警告メールの一括送信 (該当がある場合のみ) ----
+    if image_pdf_warnings:
+        subject = "【要手動確認・画像PDF検出一括報告】"
+        body = (
+            f"※警告: 文字情報が抽出できない「画像化されたPDF」が検出されました。\n"
+            f"該当者が含まれている可能性があるため、手動でご確認ください。\n\n"
+        )
+        for w in image_pdf_warnings:
+            body += f"■ 発信元サイト: {w['site_name']}\n"
+            body += f"■ 対象PDFリンク: {w['url']}\n"
+            body += "----------------------------------------\n"
+        send_email(subject, body)
+
+    # ================= 4. 空振り・定期生存報告メールの送信 =================
     report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
     report_body = "人事異動の監視プログラムが実行されました。\n各省庁の巡回結果は以下の通りです。\n\n"
     report_body += "----------------------------------------\n"
