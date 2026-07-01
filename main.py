@@ -1,3 +1,4 @@
+import os
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
@@ -19,7 +20,8 @@ CSV_IMPORTANT_POSITIONS = "重要ポジション.csv"
 
 def clean_text(text):
     if not text: return ""
-    return re.sub(r'\s+', '', str(text)).replace(' ', '').replace(' ', '')
+    # \s+ で半角・全角スペース、改行、タブのすべてが同時に除去されます
+    return re.sub(r'\s+', '', str(text))
 
 def load_watch_data():
     combined_data = []
@@ -59,10 +61,12 @@ def load_watch_data():
 WATCH_DATA = load_watch_data()
 
 # ================= 2. 送信設定 =================
-TO_ADDRESS_DETECT = "sstokyoj@city.shimonoseki.yamaguchi.jp"          # 異動検知メールの宛先
-TO_ADDRESS_REPORT = "miura.daijirou@city.shimonoseki.yamaguchi.jp"  # ★定期報告メールの宛先を変更
+TO_ADDRESS_DETECT = "sstokyoj@city.shimonoseki.yamaguchi.jp"
+TO_ADDRESS_REPORT = "miura.daijirou@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
-GMAIL_APP_PASSWORD = "qdfy qhwd bssx ptca"
+
+# セキュリティ対策: 環境変数から取得（設定されていない場合はベタ書きをフォールバックに）
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
 TARGET_SITES = {
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
@@ -79,58 +83,60 @@ TARGET_SITES = {
     "インターネット官報": "https://kanpou.npb.go.jp/"
 }
 
-# ================= 3. 通信セッションの共通構築 (リトライ付き) =================
+# ================= 3. 通信・メール・解析の最適化関数 =================
 def create_retry_session():
     session = requests.Session()
-    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    # 接続エラー対策のためバックオフ係数を2に増やし、リトライ間隔を最適化
+    retries = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
 
-def send_email(subject, body, to_address):
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = FROM_ADDRESS
-    msg["To"] = to_address
-    msg["Date"] = formatdate(localtime=True)
+def send_emails_batch(email_tasks):
+    if not email_tasks: return
     try:
-        smtpobj = smtplib.SMTP("smtp.gmail.com", 587)
-        smtpobj.starttls()
-        smtpobj.login(FROM_ADDRESS, GMAIL_APP_PASSWORD)
-        smtpobj.sendmail(FROM_ADDRESS, [to_address], msg.as_string())
-        smtpobj.close()
-        print(f"メール送信成功: {subject} -> {to_address}")
+        with smtplib.SMTP("smtp.gmail.com", 587) as smtpobj:
+            smtpobj.starttls()
+            smtpobj.login(FROM_ADDRESS, GMAIL_APP_PASSWORD)
+            for subject, body, to_address in email_tasks:
+                msg = MIMEText(body, "plain", "utf-8")
+                msg["Subject"] = subject
+                msg["From"] = FROM_ADDRESS
+                msg["To"] = to_address
+                msg["Date"] = formatdate(localtime=True)
+                smtpobj.sendmail(FROM_ADDRESS, [to_address], msg.as_string())
+                print(f"メール送信成功: {subject} -> {to_address}")
     except Exception as e:
-        print(f"メール送信失敗: {e}")
+        print(f"メールバッチ送信失敗: {e}")
 
 def parse_pdf_date(date_str):
-    if not date_str:
-        return None
+    if not date_str: return None
     clean_str = date_str.replace("D:", "").replace("'", "").replace("Z", "")
+    
+    # インデックスエラー（IndexError）を防ぐため、安全にグループから日付を抽出する形に修正
     match = re.match(r'^(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?(\d{2})?', clean_str)
     if match:
-        g = match.groups()
-        year = int(g[0])
-        month = int(g[1])
-        day = int(g[2])
-        hour = int(g[3]) if g[3] else 0
-        minute = int(g[4]) if g[4] else 0
-        second = int(g[5]) if g[5] else 0
         try:
+            year = int(match.group(1))
+            month = int(match.group(2))
+            day = int(match.group(3))
+            hour = int(match.group(4)) if match.group(4) else 0
+            minute = int(match.group(5)) if match.group(5) else 0
+            second = int(match.group(6)) if match.group(6) else 0
             return datetime(year, month, day, hour, minute, second)
-        except ValueError:
+        except (ValueError, IndexError):
             return None
     return None
 
 def extract_vertical_text_from_page(page):
     words = page.extract_words()
-    if not words:
-        return ""
+    if not words: return ""
     words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
     return "".join([w['text'] for w in words_sorted])
 
-def get_surrounding_context(name, raw_text):
+def get_surrounding_context_html(name, raw_text):
+    """ HTML用の周辺テキスト抽出（前後60文字） """
     cleaned_raw = re.sub(r'\s+', ' ', raw_text)
     pattern = ".*".join([re.escape(c) for c in name if c.strip()])
     match = re.search(pattern, cleaned_raw)
@@ -140,6 +146,44 @@ def get_surrounding_context(name, raw_text):
         context = cleaned_raw[start:end].strip()
         return f"... {context} ..."
     return "周辺情報の取得失敗"
+
+def get_surrounding_context_by_line(page, member_name):
+    """
+    【新機能】PDF用：氏名と同じ行（同じ高さ・y座標）にあるテキストだけを横一列で抽出する。
+    これにより、上下の行の無関係な情報（ノイズ）を完全にカットします。
+    """
+    words = page.extract_words()
+    if not words: return "周辺情報の取得失敗"
+    
+    cleaned_target = clean_text(member_name)
+    full_text = "".join([w['text'] for w in words])
+    if cleaned_target not in clean_text(full_text):
+        return "ターゲットが見つかりません"
+        
+    first_char = member_name[0]
+    target_words = [w for w in words if first_char in w['text']]
+    
+    if not target_words:
+        return "周辺情報の取得失敗(行特定不可)"
+        
+    base_word = target_words[0]
+    base_top = base_word['top']
+    base_bottom = base_word['bottom']
+    
+    # 同じ行とみなす上下の許容誤差（ピクセル単位）
+    tolerance = 5 
+    
+    # 氏名と同じ高さにある単語を抽出
+    same_line_words = [
+        w for w in words 
+        if (base_top - tolerance) <= w['top'] <= (base_bottom + tolerance)
+    ]
+    
+    # 左から右へ並び替えて結合
+    same_line_words_sorted = sorted(same_line_words, key=lambda w: w['x0'])
+    line_text = " ".join([w['text'] for w in same_line_words_sorted])
+    
+    return line_text if line_text.strip() else "周辺情報の取得失敗"
 
 def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
     if cleaned_name in cleaned_text_data:
@@ -201,7 +245,6 @@ def build_grouped_email_body(hits_dict):
     body = ""
     for key_name in sorted(hits_dict.keys()):
         info = hits_dict[key_name]
-        # ★直近24時間以内のソースが1つでもあれば、氏名の横に超速報ラベルを付与
         is_recent_24h = any(src.get('recent_24h', False) for src in info['sources'])
         flash_label = " 【★超速報: 24時間以内の新着情報】" if is_recent_24h else ""
         
@@ -218,14 +261,20 @@ def build_grouped_email_body(hits_dict):
         body += "\n"
     return body
 
+# ================= 4. メイン監視処理 =================
 def check_ministries():
+    # 経産省などの拒否対策：人間味のある最新のブラウザヘッダーをシミュレート
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/536.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "Cache-Control": "max-age=0"
     }
     
     now = datetime.now()
-    six_months_ago = now - timedelta(days=180)
-    twenty_four_hours_ago = now - timedelta(hours=24) # 24時間前の判定基準線
+    # ★ご要望に基づき、古いファイルの除外基準を 180日 から「90日」に短縮し、高速化
+    ninety_days_ago = now - timedelta(days=90)
+    twenty_four_hours_ago = now - timedelta(hours=24)
     
     session = create_retry_session()
     
@@ -233,6 +282,7 @@ def check_ministries():
     ex_officials_hits = {}       
     important_positions_hits = {} 
     image_pdf_warnings = []     
+    email_tasks = []
     
     for site_name, url in TARGET_SITES.items():
         print(f"【巡回中】{site_name} をチェックしています...")
@@ -257,25 +307,22 @@ def check_ministries():
                 
                 pages_data = [] 
                 is_image_pdf = False
-                is_src_recent_24h = False # 対象ファイルが24時間以内かどうかのフラグ
+                is_src_recent_24h = False
                 
                 if target_url.endswith('.pdf'):
                     with pdfplumber.open(io.BytesIO(res.content)) as pdf:
-                        # 💡【高速化最適化】全ページ解析前に、メタデータの日付チェックを最優先で実施
                         meta = pdf.metadata or {}
                         pdf_date_str = meta.get('ModDate') or meta.get('CreationDate')
                         pdf_date = parse_pdf_date(pdf_date_str)
                         
                         if pdf_date:
-                            # 6ヶ月より古いPDFなら、この時点で即座に処理をスキップ（ページ読み込みを発生させない）
-                            if pdf_date < six_months_ago:
+                            # ★90日より古いPDFはこの時点で即スキップ（超高速化）
+                            if pdf_date < ninety_days_ago:
                                 overall_results[site_name]['details'].append(f"古いPDFのためスキップ (更新日: {pdf_date.strftime('%Y-%m-%d')}): {target_url}")
                                 continue
-                            # 24時間以内かどうかを判定
                             if pdf_date >= twenty_four_hours_ago:
                                 is_src_recent_24h = True
                         
-                        # 日付チェックをパスしたものだけ、重たいテキスト解析を行う
                         checked_count += 1
                         for idx, page in enumerate(pdf.pages, 1):
                             page_raw = page.extract_text(layout=True) or ""
@@ -285,22 +332,22 @@ def check_ministries():
                                 if len(v_text.strip()) > len(page_raw.strip()):
                                     page_raw = v_text
                                     
-                            pages_data.append((str(idx), page_raw, clean_text(page_raw)))
+                            # 後方互換性と行解析のために page（オブジェクト）自体も末尾に保持
+                            pages_data.append((str(idx), page_raw, clean_text(page_raw), page))
                         
                         total_raw_len = sum(len(p[1].strip()) for p in pages_data)
                         if len(res.content) > 50000 and total_raw_len < 10:
                             is_image_pdf = True
                 else:
-                    # HTMLページ（官報やウェブ上のテキスト）
+                    # HTML（ウェブページ）の解析
                     checked_count += 1
                     html_soup = BeautifulSoup(res.text, 'html.parser')
                     for s in html_soup(['script', 'style', 'nav', 'footer']):
                         s.decompose()
                     html_text = html_soup.get_text()
-                    pages_data.append(("-", html_text, clean_text(html_text)))
+                    # HTMLの場合は page オブジェクトがないので末尾は None
+                    pages_data.append(("-", html_text, clean_text(html_text), None))
                     
-                    # HTMLに関しては正確な更新時間がメタデータで取れないことが多いため、
-                    # 官報（今日発行）や時事公報の最新一覧にあるものは最新(24h以内)の可能性があるとみなして処理するロジック（必要に応じて調整）
                     if 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url:
                         is_src_recent_24h = True
                 
@@ -309,16 +356,21 @@ def check_ministries():
                         cleaned_name = member["key_name"]
                         if not cleaned_name: continue
                         
-                        for page_num, raw_text, cleaned_pdf_text in pages_data:
-                            if is_member_in_text(cleaned_name, raw_text, cleaned_pdf_text):
-                                new_position_hint = get_surrounding_context(member["name"], raw_text)
+                        for page_num, raw_text, cleaned_text_data, page_obj in pages_data:
+                            if is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
+                                
+                                # ★【改良】PDFなら同じ行のデータに絞り、HTMLなら前後文字を切り取る
+                                if page_obj:
+                                    new_position_hint = get_surrounding_context_by_line(page_obj, member["name"])
+                                Anti-clutter-else:
+                                    new_position_hint = get_surrounding_context_html(member["name"], raw_text)
                                 
                                 source_detail = {
                                     "site_name": site_name,
                                     "url": target_url,
                                     "page": f"該当ページ: {page_num} ページ" if page_num != "-" else "WEBページ(HTML上に直接記載)",
                                     "new_position": new_position_hint,
-                                    "recent_24h": is_src_recent_24h # 24時間以内フラグをソース情報に持たせる
+                                    "recent_24h": is_src_recent_24h
                                 }
                                 
                                 target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
@@ -352,20 +404,20 @@ def check_ministries():
         overall_results[site_name]["summary"] = f"検証対象数: {checked_count}件 / ヒット数: {hits_in_site}件"
         time.sleep(1.5)
 
-    # ================= 4. 集約メールの送信 (検知宛先: TO_ADDRESS_DETECT) =================
+    # ================= 5. メールタスクの一括送信処理 =================
     if ex_officials_hits:
         subject = "【元幹部職員の異動検知】人事異動集約報告"
         body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
         body += build_grouped_email_body(ex_officials_hits)
         body += "※このメールは自動監視エージェントから送信されています。"
-        send_email(subject, body, TO_ADDRESS_DETECT)
+        email_tasks.append((subject, body, TO_ADDRESS_DETECT))
 
     if important_positions_hits:
         subject = "【要監視重要ポジションの異動検知】人事異動集約報告"
         body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
         body += build_grouped_email_body(important_positions_hits)
         body += "※このメールは自動監視エージェントから送信されています。"
-        send_email(subject, body, TO_ADDRESS_DETECT)
+        email_tasks.append((subject, body, TO_ADDRESS_DETECT))
 
     if image_pdf_warnings:
         subject = "【要手動確認・画像PDF検出一括報告】"
@@ -377,9 +429,9 @@ def check_ministries():
             body += f"■ 発信元サイト: {w['site_name']}\n"
             body += f"■ 対象PDFリンク: {w['url']}\n"
             body += "----------------------------------------\n"
-        send_email(subject, body, TO_ADDRESS_DETECT)
+        email_tasks.append((subject, body, TO_ADDRESS_DETECT))
 
-    # ================= 5. 定期生存報告メールの送信 (定期報告宛先: TO_ADDRESS_REPORTに変更) =================
+    # 定期生存報告メールの追加
     report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
     report_body = "人事異動の監視プログラムが実行されました。\n各省庁の巡回結果は以下の通りです。\n\n"
     report_body += "----------------------------------------\n"
@@ -395,9 +447,12 @@ def check_ministries():
         
     report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n"
     report_body += "※このメールはプログラムが正常に動作していることを証明するために自動送信されています。"
+    email_tasks.append((report_subject, report_body, TO_ADDRESS_REPORT))
     
-    print("【報告】定期生存報告メールを送信します...")
-    send_email(report_subject, report_body, TO_ADDRESS_REPORT) # ★三浦様のメールアドレスへ送信
+    # 溜まったタスクを安全に一括送信
+    if email_tasks:
+        print(f"【報告】メール送信処理を開始します（計 {len(email_tasks)} 通）...")
+        send_emails_batch(email_tasks)
 
 if __name__ == "__main__":
     check_ministries()
