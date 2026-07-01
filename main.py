@@ -90,17 +90,13 @@ def clean_text(text):
     if not text: return ""
     return re.sub(r'\s+', '', text).replace(' ', '')
 
-def extract_vertical_text(pdf_pages):
-    """縦書きPDF対応：文字の座標（x0, top）を利用して、並び順を並び替えてテキスト化する"""
-    full_text = ""
-    for page in pdf_pages:
-        words = page.extract_words()
-        if not words:
-            continue
-        words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
-        page_text = "".join([w['text'] for w in words_sorted])
-        full_text += page_text + "\n"
-    return full_text
+def extract_vertical_text_from_page(page):
+    """単一の縦書きPDFページをテキスト化する"""
+    words = page.extract_words()
+    if not words:
+        return ""
+    words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
+    return "".join([w['text'] for w in words_sorted])
 
 def get_surrounding_context(name, raw_text):
     """人名の周辺テキスト（新所属などのヒント）を抽出する"""
@@ -113,17 +109,18 @@ def get_surrounding_context(name, raw_text):
         return f"... {context} ..."
     return "周辺情報の取得失敗"
 
-def is_member_in_pdf(cleaned_name, raw_pdf_text, cleaned_pdf_text):
-    if cleaned_name in cleaned_pdf_text:
+def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
+    """テキスト内に指定された名前が存在するか判定する（スペース調整対応版）"""
+    if cleaned_name in cleaned_text_data:
         return True
     chars = [c for c in cleaned_name if c.strip()]
     if len(chars) < 2: return False
     
     first_char = chars[0]
-    for match in re.finditer(re.escape(first_char), raw_pdf_text):
+    for match in re.finditer(re.escape(first_char), raw_text):
         start_pos = match.start()
-        end_pos = min(len(raw_pdf_text), start_pos + 200)
-        surrounding_text = raw_pdf_text[start_pos:end_pos]
+        end_pos = min(len(raw_text), start_pos + 200)
+        surrounding_text = raw_text[start_pos:end_pos]
         cleaned_surrounding = clean_text(surrounding_text)
         
         if cleaned_name in cleaned_surrounding:
@@ -149,7 +146,6 @@ def collect_links_from_url(url, headers, deep_crawl=False):
                 if target_url not in links:
                     links.append(target_url)
                     
-        # 深層巡回（総務省、経済産業省、文部科学省に対応）
         if deep_crawl:
             sub_links = []
             for l in links:
@@ -174,17 +170,15 @@ def collect_links_from_url(url, headers, deep_crawl=False):
 def build_grouped_email_body(hits_dict):
     """人物ごとに情報をとりまとめてメール本文を作成する"""
     body = ""
-    # 人名でソートしてループ
     for name in sorted(hits_dict.keys()):
         info = hits_dict[name]
         body += f"■ 氏名: {name}\n"
         body += f"  ・ 現想定所属: {info['agency']}\n"
         body += f"  ・ 備考: {info['memo']}\n"
-        body += f"  ・ 検知ソース（複数箇所で検知された場合は全て列挙）:\n"
+        body += f"  ・ 検知ソース:\n"
         
-        # 該当人物が検知された場所をすべて書き出す
         for i, src in enumerate(info['sources'], 1):
-            body += f"    [{i}] 発信元: {src['site_name']}\n"
+            body += f"    [{i}] 発信元: {src['site_name']} (該当ページ: {src['page']})\n"
             body += f"        新所属(周辺テキスト): {src['new_position']}\n"
             body += f"        掲載リンク: {src['url']}\n"
         body += "\n"
@@ -196,17 +190,14 @@ def check_ministries():
     }
     
     overall_results = {}
-    
-    # 人物ごとに格納するための辞書構造に変更
-    ex_officials_hits = {}       # 元幹部用 { "人名": { "agency":..., "memo":..., "sources": [...] } }
-    important_positions_hits = {} # 重要ポジション用
+    ex_officials_hits = {}       
+    important_positions_hits = {} 
     image_pdf_warnings = []     
     
     for site_name, url in TARGET_SITES.items():
         print(f"【巡回中】{site_name} をチェックしています...")
         overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
         
-        # 総務省、経産省、文科省はワンクッション先まで探す(Deep Crawl)
         deep_crawl_flag = True if site_name in ["総務省(人事・組織)", "経済産業省", "文部科学省(幹部名簿)"] else False
         links = collect_links_from_url(url, headers, deep_crawl=deep_crawl_flag)
 
@@ -222,56 +213,62 @@ def check_ministries():
                 if res.status_code != 200: continue
                 
                 pdf_checked_count += 1
-                raw_text = ""
+                pages_data = [] # 各ページのテキスト情報を格納するリスト [(ページ番号, 生テキスト, クリーニングテキスト)]
                 is_image_pdf = False
                 
                 if target_url.endswith('.pdf'):
                     with pdfplumber.open(io.BytesIO(res.content)) as pdf:
-                        raw_text = "".join([page.extract_text(layout=True) or "" for page in pdf.pages])
+                        for idx, page in enumerate(pdf.pages, 1):
+                            page_raw = page.extract_text(layout=True) or ""
+                            
+                            # 農水省や、文字が引けない場合は縦書き抽出を試みる
+                            if "農林水産省" in site_name or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0):
+                                v_text = extract_vertical_text_from_page(page)
+                                if len(v_text.strip()) > len(page_raw.strip()):
+                                    page_raw = v_text
+                                    
+                            pages_data.append((str(idx), page_raw, clean_text(page_raw)))
                         
-                        if "農林水産省" in site_name or (len(raw_text.strip()) < 20 and len(pdf.pages) > 0):
-                            v_text = extract_vertical_text(pdf.pages)
-                            if len(v_text.strip()) > len(raw_text.strip()):
-                                raw_text = v_text
-                    
-                    if len(res.content) > 50000 and len(raw_text.strip()) < 10:
-                        is_image_pdf = True
+                        # 全体の文字数が極端に少ない場合は画像PDF判定
+                        total_raw_len = sum(len(p[1].strip()) for p in pages_data)
+                        if len(res.content) > 50000 and total_raw_len < 10:
+                            is_image_pdf = True
                 else:
+                    # HTMLの場合（官報・時事公報など）はページ番号概念がないため " - " とする
                     html_soup = BeautifulSoup(res.text, 'html.parser')
-                    raw_text = html_soup.get_text()
-                
-                cleaned_pdf_text = clean_text(raw_text)
+                    html_text = html_soup.get_text()
+                    pages_data.append(("-", html_text, clean_text(html_text)))
                 
                 if not is_image_pdf:
                     for member in WATCH_DATA:
                         cleaned_name = clean_text(member["name"])
                         if not cleaned_name: continue
-                            
-                        if is_member_in_pdf(cleaned_name, raw_text, cleaned_pdf_text):
-                            new_position_hint = get_surrounding_context(member["name"], raw_text)
-                            
-                            # 登録用データ構造の作成
-                            source_detail = {
-                                "site_name": site_name,
-                                "url": target_url,
-                                "new_position": new_position_hint
-                            }
-                            
-                            # 分類先辞書の決定
-                            target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
-                            
-                            # 初めてヒットした人物ならベースを作成
-                            if member["name"] not in target_dict:
-                                target_dict[member["name"]] = {
-                                    "agency": member["agency"],
-                                    "memo": member["memo"],
-                                    "sources": []
+                        
+                        # ページごとに人名が含まれているか精査
+                        for page_num, raw_text, cleaned_pdf_text in pages_data:
+                            if is_member_in_text(cleaned_name, raw_text, cleaned_pdf_text):
+                                new_position_hint = get_surrounding_context(member["name"], raw_text)
+                                
+                                source_detail = {
+                                    "site_name": site_name,
+                                    "url": target_url,
+                                    "page": f"{page_num} ページ" if page_num != "-" else "WEBページ(HTML)",
+                                    "new_position": new_position_hint
                                 }
-                            
-                            # 同一URLでの重複登録を防ぎつつ、ソース情報を追加
-                            if not any(s['url'] == target_url for s in target_dict[member["name"]]['sources']):
-                                target_dict[member["name"]]['sources'].append(source_detail)
-                                hits_in_site += 1
+                                
+                                target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
+                                
+                                if member["name"] not in target_dict:
+                                    target_dict[member["name"]] = {
+                                        "agency": member["agency"],
+                                        "memo": member["memo"],
+                                        "sources": []
+                                    }
+                                
+                                # 同一URLかつ同一ページでの重複登録を防ぎつつ追加
+                                if not any(s['url'] == target_url and s['page'] == source_detail['page'] for s in target_dict[member["name"]]['sources']):
+                                    target_dict[member["name"]]['sources'].append(source_detail)
+                                    hits_in_site += 1
                 
                 if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
                     warn_info = {"site_name": site_name, "url": target_url}
@@ -292,7 +289,7 @@ def check_ministries():
 
     # ================= 3. 集約メールの送信 =================
     
-    # ---- ① 元幹部職員の異動検知メール (人物ごとにとりまとめ) ----
+    # ---- ① 元幹部職員の異動検知メール ----
     if ex_officials_hits:
         subject = "【元幹部職員の異動検知】人事異動集約報告"
         body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
@@ -300,7 +297,7 @@ def check_ministries():
         body += "※このメールは自動監視エージェントから送信されています。"
         send_email(subject, body)
 
-    # ---- ② 要監視重要ポジションの異動検知メール (人物ごとにとりまとめ) ----
+    # ---- ② 要監視重要ポジションの異動検知メール ----
     if important_positions_hits:
         subject = "【要監視重要ポジションの異動検知】人事異動集約報告"
         body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
