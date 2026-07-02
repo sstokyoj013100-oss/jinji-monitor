@@ -264,7 +264,8 @@ def check_ministries():
     }
     
     now = datetime.now()
-    ninety_days_ago = now - timedelta(days=90)
+    # 【改良】過去90日から過去30日以内に短縮
+    thirty_days_ago = now - timedelta(days=30)
     twenty_four_hours_ago = now - timedelta(hours=24)
     
     session = create_retry_session()
@@ -277,7 +278,7 @@ def check_ministries():
     
     for site_name, url in TARGET_SITES.items():
         print(f"【巡回中】{site_name} をチェックしています...")
-        overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": []}
+        overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "details": [], "has_24h_pdf": False}
         
         deep_crawl_flag = True if "総務省" in site_name or "経済産業省" in site_name or "文部科学省" in site_name else False
         links = collect_links_from_url(session, url, headers, deep_crawl=deep_crawl_flag)
@@ -301,24 +302,25 @@ def check_ministries():
                 is_src_recent_24h = False
                 
                 if target_url.endswith('.pdf'):
-                    # 正常にPDFを取得できたら、この段階で検証対象数として確実にカウント
                     checked_count += 1
                     with pdfplumber.open(io.BytesIO(res.content)) as pdf:
                         meta = pdf.metadata or {}
                         pdf_date_str = meta.get('ModDate') or meta.get('CreationDate')
                         pdf_date = parse_pdf_date(pdf_date_str)
                         
-                        if pdf_date:
-                            if pdf_date < ninety_days_ago and "幹部名簿PDF" not in site_name:
-                                # 【変更】古いPDFのスキップ記録を報告メール用のdetailsに残さない（ログの肥大化防止）
+                        # 【解決策】名簿(meibo)や幹部名簿を含むURL以外の場合のみ、30日日付判定スキップ処理を入れる
+                        is_static_meibo = "meibo" in target_url or "list_ja.pdf" in target_url or "幹部名簿" in site_name
+                        
+                        if pdf_date and not is_static_meibo:
+                            if pdf_date < thirty_days_ago:
                                 continue
                             if pdf_date >= twenty_four_hours_ago:
                                 is_src_recent_24h = True
+                                overall_results[site_name]["has_24h_pdf"] = True
                         
                         for idx, page in enumerate(pdf.pages, 1):
                             page_raw = page.extract_text(layout=True) or ""
                             
-                            # 【修正】経済産業省も縦書き救済ロジックの判定に確実に追加
                             if "農林水産省" in site_name or "経済産業省" in site_name or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0):
                                 v_text = extract_vertical_text_from_page(page)
                                 if v_text.strip():
@@ -386,7 +388,6 @@ def check_ministries():
                     overall_results[site_name]['details'].append(f"該当者検知情報をログに記録しました: {target_url}")
                          
             except Exception as file_error:
-                # 【追記】サイレントスルーを防止するため、エラー内容をターミナルに出力
                 print(f"エラー詳細 ({target_url}): {file_error}")
                 continue
         
@@ -395,15 +396,20 @@ def check_ministries():
         time.sleep(1.5)
 
     # ================= 5. メールタスクの一括送信処理 =================
+    # 【改良】人事異動集約報告メールにて、24時間以内のソースがある場合に件名へ「★」を付与
     if ex_officials_hits:
-        subject = "【元幹部職員の異動検知】人事異動集約報告"
+        has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in ex_officials_hits.values())
+        subject_prefix = "★" if has_24h_hit else ""
+        subject = f"{subject_prefix}【元幹部職員の異動検知】人事異動集約報告"
         body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
         body += build_grouped_email_body(ex_officials_hits)
         body += "※このメールは自動監視エージェントから送信されています。"
         email_tasks.append((subject, body, TO_ADDRESS_DETECT))
 
     if important_positions_hits:
-        subject = "【要監視重要ポジションの異動検知】人事異動集約報告"
+        has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in important_positions_hits.values())
+        subject_prefix = "★" if has_24h_hit else ""
+        subject = f"{subject_prefix}【要監視重要ポジションの異動検知】人事異動集約報告"
         body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
         body += build_grouped_email_body(important_positions_hits)
         body += "※このメールは自動監視エージェントから送信されています。"
@@ -427,10 +433,12 @@ def check_ministries():
     report_body += "----------------------------------------\n"
     
     for site, res in overall_results.items():
+        # 【改良】定期報告の概要に24時間以内PDFがあれば★をつける
+        star_label = " ★" if res.get("has_24h_pdf", False) else ""
         report_body += f"■ 省庁・サイト名: {site}\n"
         report_body += f"  ステータス: {res['status']}\n"
         if "summary" in res:
-            report_body += f"  処理概要: {res['summary']}\n"
+            report_body += f"  処理概要: {res['summary']}{star_label}\n"
         if res['details']:
             report_body += "  詳細ログ:\n" + "\n".join([f"    - {d}" for d in res['details']]) + "\n"
         report_body += "----------------------------------------\n"
