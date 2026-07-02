@@ -201,7 +201,6 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
         
     links = []
     try:
-        # 【修正箇所】末尾の閉じカッコ ) を補完しました
         res = session.get(url, headers=headers, timeout=40)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -302,6 +301,8 @@ def check_ministries():
                 is_src_recent_24h = False
                 
                 if target_url.endswith('.pdf'):
+                    # 正常にPDFを取得できたら、この段階で検証対象数として確実にカウント
+                    checked_count += 1
                     with pdfplumber.open(io.BytesIO(res.content)) as pdf:
                         meta = pdf.metadata or {}
                         pdf_date_str = meta.get('ModDate') or meta.get('CreationDate')
@@ -309,16 +310,15 @@ def check_ministries():
                         
                         if pdf_date:
                             if pdf_date < ninety_days_ago and "幹部名簿PDF" not in site_name:
-                                overall_results[site_name]['details'].append(f"古いPDFのためスキップ (更新日: {pdf_date.strftime('%Y-%m-%d')}): {target_url}")
+                                # 【変更】古いPDFのスキップ記録を報告メール用のdetailsに残さない（ログの肥大化防止）
                                 continue
                             if pdf_date >= twenty_four_hours_ago:
                                 is_src_recent_24h = True
                         
-                        checked_count += 1
                         for idx, page in enumerate(pdf.pages, 1):
                             page_raw = page.extract_text(layout=True) or ""
                             
-                            # 経済産業省の縦書きPDF解析に対応
+                            # 【修正】経済産業省も縦書き救済ロジックの判定に確実に追加
                             if "農林水産省" in site_name or "経済産業省" in site_name or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0):
                                 v_text = extract_vertical_text_from_page(page)
                                 if v_text.strip():
@@ -386,6 +386,8 @@ def check_ministries():
                     overall_results[site_name]['details'].append(f"該当者検知情報をログに記録しました: {target_url}")
                          
             except Exception as file_error:
+                # 【追記】サイレントスルーを防止するため、エラー内容をターミナルに出力
+                print(f"エラー詳細 ({target_url}): {file_error}")
                 continue
         
         overall_results[site_name]["status"] = "正常巡回完了"
