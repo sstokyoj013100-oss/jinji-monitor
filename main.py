@@ -66,9 +66,9 @@ FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
-# 【URL修正】ご指摘の正しい案内ページURLに変更して先頭配置
+# 【原案復帰＋先頭配置】経済産業省をPDF直リンクに戻し、強力ヘッダーで突破を図る
 TARGET_SITES = {
-    "経済産業省(幹部名簿ページ)": "https://www.meti.go.jp/intro/data/index_leaders.html",
+    "経済産業省(幹部名簿PDF)": "https://www.meti.go.jp/intro/data/pdf/list_ja.pdf",
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
     "農林水産省(人事異動)": "https://www.maff.go.jp/j/org/who/meibo/personnel_change/index.html",
@@ -259,13 +259,27 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
 
 def download_file_safely(session, url, headers):
     try:
-        is_meti_pdf = "meti.go.jp" in url and url.endswith(".pdf")
+        is_meti = "meti.go.jp" in url
+        is_meti_pdf = is_meti and url.endswith(".pdf")
+        
+        # クロードの助言を反映：経産省への通信時のみリファラとAcceptヘッダーを動的に注入・上書き
+        current_headers = headers.copy()
+        if is_meti:
+            current_headers["Referer"] = "https://www.meti.go.jp/"
+            if is_meti_pdf:
+                current_headers["Accept"] = "application/pdf,*/*"
         
         connect_timeout = 180 if is_meti_pdf else 20
         download_limit_time = 180 if is_meti_pdf else 20
         
-        with session.get(url, headers=headers, timeout=connect_timeout, stream=True) as res:
-            if res.status_code != 200:
+        with session.get(url, headers=current_headers, timeout=connect_timeout, stream=True) as res:
+            # クロードの助言：ステータスコードの検証を追加
+            res.raise_for_status()
+            
+            # クロードの助言：Content-Typeの検証
+            content_type = res.headers.get("Content-Type", "")
+            if is_meti_pdf and "pdf" not in content_type.lower():
+                print(f"警告: PDFを期待しましたが異なるファイル型が返されました ({content_type}) -> URL: {url}")
                 return None
                 
             content = bytearray()
@@ -334,8 +348,15 @@ def check_ministries():
         print(f"【巡回中】{site_name} をチェックしています...")
         overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "has_24h_pdf": False}
         
-        deep_crawl_flag = True if "総務省" in site_name or "経済産業省" in site_name or "文部科学省" in site_name else False
-        links = collect_links_from_url(session, url, headers, deep_crawl=deep_crawl_flag)
+        # 経産省はPDF直リンクなのでdeep_crawlは不要に設定
+        deep_crawl_flag = True if "総務省" in site_name or "文部科学省" in site_name else False
+        
+        # 経産省へのリンク収集(HTML読み込み)時にもリファラを乗せるため動的処理
+        current_headers = headers.copy()
+        if "meti.go.jp" in url:
+            current_headers["Referer"] = "https://www.meti.go.jp/"
+            
+        links = collect_links_from_url(session, url, current_headers, deep_crawl=deep_crawl_flag)
 
         if url not in links:
             links.insert(0, url)
