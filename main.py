@@ -187,31 +187,39 @@ def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
     return False
 
 def clean_and_validate_url(base_url, href_str):
-    """ 【新アプローチ】ホワイトリストによる外部ドメイン(Adobe等)・バグURLの完全排除 """
+    """ 【構造解析アプローチ】urlparseを駆使して二重結合URLや不正ホストを厳格に遮断 """
     href_str = href_str.strip()
     if not href_str or href_str.startswith(('javascript:', 'mailto:', '#')):
         return None
-        
-    # URL二重結合バグの補正
-    if href_str.count("https://") >= 2 or href_str.count("http://") >= 2:
+
+    # 1. 結合前の href 自体に異常な「二重プロトコル様文字列」が含まれる場合の先行防御
+    if "https:/" in href_str[6:] or "http:/" in href_str[5:]:
+        # 後方の有効なURL部分だけを無理やり引っこ抜く
         matches = re.findall(r'https?://[^\s]+', href_str)
         if matches:
             target_url = matches[-1]
         else:
             return None
     else:
+        # 通常の相対・絶対パスの結合
         target_url = urljoin(base_url, href_str)
-        
+
+    # 2. 結合後URLの厳格なパース検証
     parsed_target = urlparse(target_url)
-    
-    # 許可するホワイトリストドメイン（これ以外は一切見に行かない）
+    host = parsed_target.netloc.lower()
+
+    # ドメイン末尾や構成が正しいか、独立したホスト名として検証するためのホワイトリスト（完全一致 or 末尾一致用）
     allowed_domains = [
         "soumu.go.jp", "mlit.go.jp", "maff.go.jp", "mhlw.go.jp", 
         "cao.go.jp", "cfa.go.jp", "mext.go.jp", "reconstruction.go.jp", 
         "meti.go.jp", "jihyo.co.jp", "kanpou.npb.go.jp"
     ]
-    
-    if any(domain in parsed_target.netloc for domain in allowed_domains):
+
+    # 「www.maff.go.jphttps」のような末尾がバグったホスト名を弾くため、
+    # allowed_domainsのいずれかで「完全に終わっているか（末尾一致）」を厳格チェック
+    is_valid_domain = any(host == domain or host.endswith("." + domain) for domain in allowed_domains)
+
+    if is_valid_domain and parsed_target.scheme in ['http', 'https']:
         return target_url
         
     return None
@@ -222,7 +230,6 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
         
     links = []
     try:
-        # タイムアウトを20秒に設定
         res = session.get(url, headers=headers, timeout=20)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -258,9 +265,7 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
     return links
 
 def download_file_safely(session, url, headers):
-    """ 【新アプローチ】stream=True を用いた20秒制限付きの安全な段階的取得 """
     try:
-        # timeout=20秒。接続開始の制限
         with session.get(url, headers=headers, timeout=20, stream=True) as res:
             if res.status_code != 200:
                 return None
@@ -268,7 +273,6 @@ def download_file_safely(session, url, headers):
             content = bytearray()
             start_time = time.time()
             
-            # 512KBずつ分割してダウンロード
             for chunk in res.iter_content(chunk_size=524288):
                 if time.time() - start_time > 20:
                     print(f"警告: 20秒以内にダウンロードが終わらないため切断しました ({url})")
@@ -276,7 +280,6 @@ def download_file_safely(session, url, headers):
                 if chunk:
                     content.extend(chunk)
                     
-                # 30MBを超えるような巨大すぎるPDFは国会図書館レベルのアーカイブファイルとみなして切断
                 if len(content) > 31457280:
                     print(f"警告: ファイルサイズが大きすぎるためスキップします ({url})")
                     return None
@@ -346,7 +349,6 @@ def check_ministries():
                 continue
                 
             try:
-                # 安全な段階的ストリームダウンロード関数（タイムアウト20秒内包）を呼び出し
                 file_content = download_file_safely(session, target_url, headers)
                 if not file_content: continue
                 
