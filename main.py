@@ -66,9 +66,9 @@ FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
-# 【順序変更】テスト短縮のため経済産業省を先頭に配置
+# 【案A適用】経済産業省をPDF直リンクから「幹部名簿の案内HTMLページ」に変更して先頭配置
 TARGET_SITES = {
-    "経済産業省(幹部名簿PDF)": "https://www.meti.go.jp/intro/data/pdf/list_ja.pdf",
+    "経済産業省(幹部名簿ページ)": "https://www.meti.go.jp/intro/data/list_ja.html",
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
     "農林水産省(人事異動)": "https://www.maff.go.jp/j/org/who/meibo/personnel_change/index.html",
