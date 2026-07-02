@@ -141,7 +141,7 @@ def get_surrounding_context_html(name, raw_text, site_name=""):
         return f"... {context} ..."
     return "周辺情報の取得失敗"
 
-# 【アップデート】改行や別行のデータを完全に遮断し、同一行のテキストのみに絞り込む
+# 【完全修正】同一行のテキストに絞り込み、かつ右側（異動先）は文字数制限なく行末まで全取得する
 def get_surrounding_context_by_line(page, member_name):
     words = page.extract_words()
     if not words: return "周辺情報の取得失敗"
@@ -170,14 +170,14 @@ def get_surrounding_context_by_line(page, member_name):
     line_text = " ".join([w['text'] for w in same_line_words_sorted])
     cleaned_line = re.sub(r'\s+', ' ', line_text).strip()
     
-    # 同一行のテキスト内で、名前の前後最大20文字を切り出し
+    # 同一行内で名前の位置を特定し、右側は制限なしで行末まで取得
     pattern = ".*".join([re.escape(c) for c in member_name if c.strip()])
     match = re.search(pattern, cleaned_line)
     if match:
-        width = 20
-        start = max(0, match.start() - width)
-        end = min(len(cleaned_line), match.end() + width)
-        return f"... {cleaned_line[start:end].strip()} ..."
+        # 左側（前）は最大20文字、右側（後・異動先）は行末まで完全に切り出す
+        start = max(0, match.start() - 20)
+        end = len(cleaned_line)
+        return f"... {cleaned_line[start:end].strip()}"
         
     return line_text if line_text.strip() else "周辺情報の取得失敗"
 
