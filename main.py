@@ -66,7 +66,6 @@ FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
-# 経済産業省は環境ブロックのためコメントアウトを維持
 TARGET_SITES = {
     # "経済産業省(幹部名簿PDF)": "https://www.meti.go.jp/intro/data/pdf/list_ja.pdf",
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
@@ -130,19 +129,19 @@ def extract_vertical_text_from_page(page):
     words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
     return "".join([w['text'] for w in words_sorted])
 
-# 【修正】HTML上の周辺情報取得を前後20文字（計40文字程度）に厳格制限
 def get_surrounding_context_html(name, raw_text, site_name=""):
     cleaned_raw = re.sub(r'\s+', ' ', raw_text)
     pattern = ".*".join([re.escape(c) for c in name if c.strip()])
     match = re.search(pattern, cleaned_raw)
     if match:
-        width = 20  # 前後の文字数を20文字に固定
+        width = 20  
         start = max(0, match.start() - width)
         end = min(len(cleaned_raw), match.end() + width)
         context = cleaned_raw[start:end].strip()
         return f"... {context} ..."
     return "周辺情報の取得失敗"
 
+# 【アップデート】改行や別行のデータを完全に遮断し、同一行のテキストのみに絞り込む
 def get_surrounding_context_by_line(page, member_name):
     words = page.extract_words()
     if not words: return "周辺情報の取得失敗"
@@ -160,12 +159,26 @@ def get_surrounding_context_by_line(page, member_name):
     base_bottom = base_word['bottom']
     tolerance = 5 
     
+    # 完全に同じ高さ（同一行）にある単語のみを抽出
     same_line_words = [
         w for w in words 
         if (base_top - tolerance) <= w['top'] <= (base_bottom + tolerance)
     ]
     same_line_words_sorted = sorted(same_line_words, key=lambda w: w['x0'])
+    
+    # 同一行のテキストを構築（改行は含まれない）
     line_text = " ".join([w['text'] for w in same_line_words_sorted])
+    cleaned_line = re.sub(r'\s+', ' ', line_text).strip()
+    
+    # 同一行のテキスト内で、名前の前後最大20文字を切り出し
+    pattern = ".*".join([re.escape(c) for c in member_name if c.strip()])
+    match = re.search(pattern, cleaned_line)
+    if match:
+        width = 20
+        start = max(0, match.start() - width)
+        end = min(len(cleaned_line), match.end() + width)
+        return f"... {cleaned_line[start:end].strip()} ..."
+        
     return line_text if line_text.strip() else "周辺情報の取得失敗"
 
 def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
@@ -305,7 +318,7 @@ def build_grouped_email_body(hits_dict):
     for key_name in sorted(hits_dict.keys()):
         info = hits_dict[key_name]
         is_recent_24h = any(src.get('recent_24h', False) for src in info['sources'])
-        flash_label = " 【★超速報: 24時間い内の新着情報】" if is_recent_24h else ""
+        flash_label = " 【★超速報: 24時間以内の新着情報】" if is_recent_24h else ""
         
         body += f"■ 氏名: {info['display_name']}{flash_label}\n"
         body += f"  ・ 現想定所属: {info['agency']}\n"
