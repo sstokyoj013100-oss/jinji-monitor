@@ -66,9 +66,9 @@ FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
-# 【原案復帰＋先頭配置】経済産業省をPDF直リンクに戻し、強力ヘッダーで突破を図る
+# 経済産業省は環境ブロックのためコメントアウトを維持
 TARGET_SITES = {
-    "経済産業省(幹部名簿PDF)": "https://www.meti.go.jp/intro/data/pdf/list_ja.pdf",
+    # "経済産業省(幹部名簿PDF)": "https://www.meti.go.jp/intro/data/pdf/list_ja.pdf",
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
     "農林水産省(人事異動)": "https://www.maff.go.jp/j/org/who/meibo/personnel_change/index.html",
@@ -130,12 +130,13 @@ def extract_vertical_text_from_page(page):
     words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
     return "".join([w['text'] for w in words_sorted])
 
+# 【修正】HTML上の周辺情報取得を前後20文字（計40文字程度）に厳格制限
 def get_surrounding_context_html(name, raw_text, site_name=""):
     cleaned_raw = re.sub(r'\s+', ' ', raw_text)
     pattern = ".*".join([re.escape(c) for c in name if c.strip()])
     match = re.search(pattern, cleaned_raw)
     if match:
-        width = 25 if "厚生労働省" in site_name else 60
+        width = 20  # 前後の文字数を20文字に固定
         start = max(0, match.start() - width)
         end = min(len(cleaned_raw), match.end() + width)
         context = cleaned_raw[start:end].strip()
@@ -262,7 +263,6 @@ def download_file_safely(session, url, headers):
         is_meti = "meti.go.jp" in url
         is_meti_pdf = is_meti and url.endswith(".pdf")
         
-        # クロードの助言を反映：経産省への通信時のみリファラとAcceptヘッダーを動的に注入・上書き
         current_headers = headers.copy()
         if is_meti:
             current_headers["Referer"] = "https://www.meti.go.jp/"
@@ -273,10 +273,8 @@ def download_file_safely(session, url, headers):
         download_limit_time = 180 if is_meti_pdf else 20
         
         with session.get(url, headers=current_headers, timeout=connect_timeout, stream=True) as res:
-            # クロードの助言：ステータスコードの検証を追加
             res.raise_for_status()
             
-            # クロードの助言：Content-Typeの検証
             content_type = res.headers.get("Content-Type", "")
             if is_meti_pdf and "pdf" not in content_type.lower():
                 print(f"警告: PDFを期待しましたが異なるファイル型が返されました ({content_type}) -> URL: {url}")
@@ -307,7 +305,7 @@ def build_grouped_email_body(hits_dict):
     for key_name in sorted(hits_dict.keys()):
         info = hits_dict[key_name]
         is_recent_24h = any(src.get('recent_24h', False) for src in info['sources'])
-        flash_label = " 【★超速報: 24時間以内の新着情報】" if is_recent_24h else ""
+        flash_label = " 【★超速報: 24時間い内の新着情報】" if is_recent_24h else ""
         
         body += f"■ 氏名: {info['display_name']}{flash_label}\n"
         body += f"  ・ 現想定所属: {info['agency']}\n"
@@ -348,10 +346,8 @@ def check_ministries():
         print(f"【巡回中】{site_name} をチェックしています...")
         overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "has_24h_pdf": False}
         
-        # 経産省はPDF直リンクなのでdeep_crawlは不要に設定
         deep_crawl_flag = True if "総務省" in site_name or "文部科学省" in site_name else False
         
-        # 経産省へのリンク収集(HTML読み込み)時にもリファラを乗せるため動的処理
         current_headers = headers.copy()
         if "meti.go.jp" in url:
             current_headers["Referer"] = "https://www.meti.go.jp/"
