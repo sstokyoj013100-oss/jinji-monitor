@@ -129,19 +129,24 @@ def extract_vertical_text_from_page(page):
     words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
     return "".join([w['text'] for w in words_sorted])
 
+# 【修正】厚労省や文科省などのHTMLページで長すぎる抜き出しになる問題を解決するロジック
 def get_surrounding_context_html(name, raw_text, site_name=""):
+    # 連続する空白を1つにまとめる
     cleaned_raw = re.sub(r'\s+', ' ', raw_text)
+    
+    # 名前の文字の間に任意の文字を挟むパターン（スペース対策）
     pattern = ".*".join([re.escape(c) for c in name if c.strip()])
     match = re.search(pattern, cleaned_raw)
+    
     if match:
-        width = 20  
-        start = max(0, match.start() - width)
-        end = min(len(cleaned_raw), match.end() + width)
+        # 左（前）は20文字、右（後ろの異動先情報）は150文字程度に絞ってピンポイント抽出
+        start = max(0, match.start() - 20)
+        end = min(len(cleaned_raw), match.end() + 150)
         context = cleaned_raw[start:end].strip()
         return f"... {context} ..."
     return "周辺情報の取得失敗"
 
-# 【完全修正】同一行のテキストに絞り込み、かつ右側（異動先）は文字数制限なく行末まで全取得する
+# PDF用の同一行抽出ロジック（右側は行末まで完全に取得）
 def get_surrounding_context_by_line(page, member_name):
     words = page.extract_words()
     if not words: return "周辺情報の取得失敗"
@@ -159,22 +164,18 @@ def get_surrounding_context_by_line(page, member_name):
     base_bottom = base_word['bottom']
     tolerance = 5 
     
-    # 完全に同じ高さ（同一行）にある単語のみを抽出
     same_line_words = [
         w for w in words 
         if (base_top - tolerance) <= w['top'] <= (base_bottom + tolerance)
     ]
     same_line_words_sorted = sorted(same_line_words, key=lambda w: w['x0'])
     
-    # 同一行のテキストを構築（改行は含まれない）
     line_text = " ".join([w['text'] for w in same_line_words_sorted])
     cleaned_line = re.sub(r'\s+', ' ', line_text).strip()
     
-    # 同一行内で名前の位置を特定し、右側は制限なしで行末まで取得
     pattern = ".*".join([re.escape(c) for c in member_name if c.strip()])
     match = re.search(pattern, cleaned_line)
     if match:
-        # 左側（前）は最大20文字、右側（後・異動先）は行末まで完全に切り出す
         start = max(0, match.start() - 20)
         end = len(cleaned_line)
         return f"... {cleaned_line[start:end].strip()}"
