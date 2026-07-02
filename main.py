@@ -66,9 +66,9 @@ FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
-# 【案A適用】経済産業省をPDF直リンクから「幹部名簿の案内HTMLページ」に変更して先頭配置
+# 【URL修正】ご指摘の正しい案内ページURLに変更して先頭配置
 TARGET_SITES = {
-    "経済産業省(幹部名簿ページ)": "https://www.meti.go.jp/intro/data/list_ja.html",
+    "経済産業省(幹部名簿ページ)": "https://www.meti.go.jp/intro/data/index_leaders.html",
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
     "農林水産省(人事異動)": "https://www.maff.go.jp/j/org/who/meibo/personnel_change/index.html",
@@ -258,7 +258,6 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
     return links
 
 def download_file_safely(session, url, headers):
-    """ 経済産業省の巨大名簿に限り、最大180秒(3分)まで待機するように調整 """
     try:
         is_meti_pdf = "meti.go.jp" in url and url.endswith(".pdf")
         
