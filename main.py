@@ -66,7 +66,9 @@ FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
+# 【順序変更】テスト短縮のため経済産業省を先頭に配置
 TARGET_SITES = {
+    "経済産業省(幹部名簿PDF)": "https://www.meti.go.jp/intro/data/pdf/list_ja.pdf",
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
     "農林水産省(人事異動)": "https://www.maff.go.jp/j/org/who/meibo/personnel_change/index.html",
@@ -75,7 +77,6 @@ TARGET_SITES = {
     "こども家庭庁(人事)": "https://www.cfa.go.jp/about/jinji",
     "文部科学省(幹部名簿)": "https://www.mext.go.jp/b_menu/soshiki2/kanbumeibo.htm",
     "復興庁(人事)": "https://www.reconstruction.go.jp/topics/cat-114/jinji/",
-    "経済産業省(幹部名簿PDF)": "https://www.meti.go.jp/intro/data/pdf/list_ja.pdf",
     "時事公報(人事ニュース)": "https://www.jihyo.co.jp/jinji_news/",
     "インターネット官報": "https://kanpou.npb.go.jp/"
 }
@@ -187,36 +188,28 @@ def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
     return False
 
 def clean_and_validate_url(base_url, href_str):
-    """ 【構造解析アプローチ】urlparseを駆使して二重結合URLや不正ホストを厳格に遮断 """
     href_str = href_str.strip()
     if not href_str or href_str.startswith(('javascript:', 'mailto:', '#')):
         return None
 
-    # 1. 結合前の href 自体に異常な「二重プロトコル様文字列」が含まれる場合の先行防御
     if "https:/" in href_str[6:] or "http:/" in href_str[5:]:
-        # 後方の有効なURL部分だけを無理やり引っこ抜く
         matches = re.findall(r'https?://[^\s]+', href_str)
         if matches:
             target_url = matches[-1]
         else:
             return None
     else:
-        # 通常の相対・絶対パスの結合
         target_url = urljoin(base_url, href_str)
 
-    # 2. 結合後URLの厳格なパース検証
     parsed_target = urlparse(target_url)
     host = parsed_target.netloc.lower()
 
-    # ドメイン末尾や構成が正しいか、独立したホスト名として検証するためのホワイトリスト（完全一致 or 末尾一致用）
     allowed_domains = [
         "soumu.go.jp", "mlit.go.jp", "maff.go.jp", "mhlw.go.jp", 
         "cao.go.jp", "cfa.go.jp", "mext.go.jp", "reconstruction.go.jp", 
         "meti.go.jp", "jihyo.co.jp", "kanpou.npb.go.jp"
     ]
 
-    # 「www.maff.go.jphttps」のような末尾がバグったホスト名を弾くため、
-    # allowed_domainsのいずれかで「完全に終わっているか（末尾一致）」を厳格チェック
     is_valid_domain = any(host == domain or host.endswith("." + domain) for domain in allowed_domains)
 
     if is_valid_domain and parsed_target.scheme in ['http', 'https']:
@@ -265,22 +258,29 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
     return links
 
 def download_file_safely(session, url, headers):
+    """ 経済産業省の巨大名簿に限り、最大180秒(3分)まで待機するように調整 """
     try:
-        with session.get(url, headers=headers, timeout=20, stream=True) as res:
+        is_meti_pdf = "meti.go.jp" in url and url.endswith(".pdf")
+        
+        connect_timeout = 180 if is_meti_pdf else 20
+        download_limit_time = 180 if is_meti_pdf else 20
+        
+        with session.get(url, headers=headers, timeout=connect_timeout, stream=True) as res:
             if res.status_code != 200:
                 return None
                 
             content = bytearray()
             start_time = time.time()
             
-            for chunk in res.iter_content(chunk_size=524288):
-                if time.time() - start_time > 20:
-                    print(f"警告: 20秒以内にダウンロードが終わらないため切断しました ({url})")
+            for chunk in res.iter_content(chunk_size=524288): 
+                if time.time() - start_time > download_limit_time:
+                    print(f"警告: 設定された制限時間({download_limit_time}秒)以内にダウンロードが終わらないため切断しました ({url})")
                     return None
                 if chunk:
                     content.extend(chunk)
                     
-                if len(content) > 31457280:
+                size_limit = 52428800 if is_meti_pdf else 31457280
+                if len(content) > size_limit:
                     print(f"警告: ファイルサイズが大きすぎるためスキップします ({url})")
                     return None
                     
