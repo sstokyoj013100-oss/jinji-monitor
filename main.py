@@ -83,7 +83,7 @@ TARGET_SITES = {
 # ================= 3. 通信・メール・解析の最適化関数 =================
 def create_retry_session():
     session = requests.Session()
-    retries = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
+    retries = Retry(total=2, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
@@ -109,7 +109,6 @@ def send_emails_batch(email_tasks):
 def parse_pdf_date(date_str):
     if not date_str: return None
     clean_str = date_str.replace("D:", "").replace("'", "").replace("Z", "")
-    
     match = re.match(r'^(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?(\d{2})?', clean_str)
     if match:
         try:
@@ -131,7 +130,6 @@ def extract_vertical_text_from_page(page):
     return "".join([w['text'] for w in words_sorted])
 
 def get_surrounding_context_html(name, raw_text, site_name=""):
-    """ HTML用の周辺テキスト抽出 """
     cleaned_raw = re.sub(r'\s+', ' ', raw_text)
     pattern = ".*".join([re.escape(c) for c in name if c.strip()])
     match = re.search(pattern, cleaned_raw)
@@ -144,10 +142,8 @@ def get_surrounding_context_html(name, raw_text, site_name=""):
     return "周辺情報の取得失敗"
 
 def get_surrounding_context_by_line(page, member_name):
-    """ PDF用：氏名と同じ行（同じ高さ）にあるテキストだけを横一列で抽出 """
     words = page.extract_words()
     if not words: return "周辺情報の取得失敗"
-    
     cleaned_target = clean_text(member_name)
     full_text = "".join([w['text'] for w in words])
     if cleaned_target not in clean_text(full_text):
@@ -155,24 +151,19 @@ def get_surrounding_context_by_line(page, member_name):
         
     first_char = member_name[0]
     target_words = [w for w in words if first_char in w['text']]
-    
-    if not target_words:
-        return "周辺情報の取得失敗(行特定不可)"
+    if not target_words: return "周辺情報の取得失敗(行特定不可)"
         
     base_word = target_words[0]
     base_top = base_word['top']
     base_bottom = base_word['bottom']
-    
     tolerance = 5 
     
     same_line_words = [
         w for w in words 
         if (base_top - tolerance) <= w['top'] <= (base_bottom + tolerance)
     ]
-    
     same_line_words_sorted = sorted(same_line_words, key=lambda w: w['x0'])
     line_text = " ".join([w['text'] for w in same_line_words_sorted])
-    
     return line_text if line_text.strip() else "周辺情報の取得失敗"
 
 def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
@@ -195,19 +186,51 @@ def is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
             return True
     return False
 
+def clean_and_validate_url(base_url, href_str):
+    """ 【新アプローチ】ホワイトリストによる外部ドメイン(Adobe等)・バグURLの完全排除 """
+    href_str = href_str.strip()
+    if not href_str or href_str.startswith(('javascript:', 'mailto:', '#')):
+        return None
+        
+    # URL二重結合バグの補正
+    if href_str.count("https://") >= 2 or href_str.count("http://") >= 2:
+        matches = re.findall(r'https?://[^\s]+', href_str)
+        if matches:
+            target_url = matches[-1]
+        else:
+            return None
+    else:
+        target_url = urljoin(base_url, href_str)
+        
+    parsed_target = urlparse(target_url)
+    
+    # 許可するホワイトリストドメイン（これ以外は一切見に行かない）
+    allowed_domains = [
+        "soumu.go.jp", "mlit.go.jp", "maff.go.jp", "mhlw.go.jp", 
+        "cao.go.jp", "cfa.go.jp", "mext.go.jp", "reconstruction.go.jp", 
+        "meti.go.jp", "jihyo.co.jp", "kanpou.npb.go.jp"
+    ]
+    
+    if any(domain in parsed_target.netloc for domain in allowed_domains):
+        return target_url
+        
+    return None
+
 def collect_links_from_url(session, url, headers, deep_crawl=False):
     if url.endswith('.pdf'):
         return [url]
         
     links = []
     try:
-        res = session.get(url, headers=headers, timeout=40)
+        # タイムアウトを20秒に設定
+        res = session.get(url, headers=headers, timeout=20)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, 'html.parser')
         
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href'].strip()
-            target_url = urljoin(url, href)
+            target_url = clean_and_validate_url(url, href)
+            if not target_url: continue
             
             if href.endswith('.pdf') or href.endswith('.html') or href.endswith('.htm') or 'jidou' in href or 'jinji' in href or 'meibo' in href or 'kanpou' in url:
                 if target_url not in links:
@@ -219,12 +242,12 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
                 if (l.endswith('.html') or l.endswith('.htm')) and ('jinji' in l or 'sosiki' in l or 'meibo' in l or 'saiyou' in l or 'b_menu' in l or 'intro' in l):
                     try:
                         time.sleep(0.5)
-                        sub_res = session.get(l, headers=headers, timeout=40)
+                        sub_res = session.get(l, headers=headers, timeout=20)
                         sub_soup = BeautifulSoup(sub_res.text, 'html.parser')
                         for sub_a in sub_soup.find_all('a', href=True):
                             sub_href = sub_a['href'].strip()
-                            sub_target = urljoin(l, sub_href)
-                            if sub_target.endswith('.pdf') and sub_target not in links and sub_target not in sub_links:
+                            sub_target = clean_and_validate_url(l, sub_href)
+                            if sub_target and sub_target.endswith('.pdf') and sub_target not in links and sub_target not in sub_links:
                                 sub_links.append(sub_target)
                     except:
                         continue
@@ -233,6 +256,35 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
     except Exception as e:
         print(f"リンク収集エラー ({url}): {e}")
     return links
+
+def download_file_safely(session, url, headers):
+    """ 【新アプローチ】stream=True を用いた20秒制限付きの安全な段階的取得 """
+    try:
+        # timeout=20秒。接続開始の制限
+        with session.get(url, headers=headers, timeout=20, stream=True) as res:
+            if res.status_code != 200:
+                return None
+                
+            content = bytearray()
+            start_time = time.time()
+            
+            # 512KBずつ分割してダウンロード
+            for chunk in res.iter_content(chunk_size=524288):
+                if time.time() - start_time > 20:
+                    print(f"警告: 20秒以内にダウンロードが終わらないため切断しました ({url})")
+                    return None
+                if chunk:
+                    content.extend(chunk)
+                    
+                # 30MBを超えるような巨大すぎるPDFは国会図書館レベルのアーカイブファイルとみなして切断
+                if len(content) > 31457280:
+                    print(f"警告: ファイルサイズが大きすぎるためスキップします ({url})")
+                    return None
+                    
+            return bytes(content)
+    except Exception as e:
+        print(f"ダウンロードエラー ({url}): {e}")
+        return None
 
 def build_grouped_email_body(hits_dict):
     body = ""
@@ -289,159 +341,4 @@ def check_ministries():
         checked_count = 0
         hits_in_site = 0
         
-        for target_url in links:
-            if not (target_url.endswith('.pdf') or target_url.endswith('.html') or target_url.endswith('.htm') or 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url):
-                continue
-                
-            try:
-                res = session.get(target_url, headers=headers, timeout=120)
-                if res.status_code != 200: continue
-                
-                pages_data = [] 
-                is_image_pdf = False
-                is_src_recent_24h = False
-                
-                if target_url.endswith('.pdf'):
-                    checked_count += 1
-                    with pdfplumber.open(io.BytesIO(res.content)) as pdf:
-                        meta = pdf.metadata or {}
-                        pdf_date_str = meta.get('ModDate') or meta.get('CreationDate')
-                        pdf_date = parse_pdf_date(pdf_date_str)
-                        
-                        is_static_meibo = "meibo" in target_url or "list_ja.pdf" in target_url or "幹部名簿" in site_name
-                        
-                        if pdf_date and not is_static_meibo:
-                            if pdf_date < thirty_days_ago:
-                                continue
-                            if pdf_date >= twenty_four_hours_ago:
-                                is_src_recent_24h = True
-                                overall_results[site_name]["has_24h_pdf"] = True
-                        
-                        for idx, page in enumerate(pdf.pages, 1):
-                            page_raw = page.extract_text(layout=True) or ""
-                            
-                            if "農林水産省" in site_name or "経済産業省" in site_name or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0):
-                                v_text = extract_vertical_text_from_page(page)
-                                if v_text.strip():
-                                    page_raw = v_text
-                                    
-                            pages_data.append((str(idx), page_raw, clean_text(page_raw), page))
-                        
-                        total_raw_len = sum(len(p[1].strip()) for p in pages_data)
-                        if len(res.content) > 50000 and total_raw_len < 10:
-                            is_image_pdf = True
-                else:
-                    checked_count += 1
-                    html_soup = BeautifulSoup(res.text, 'html.parser')
-                    for s in html_soup(['script', 'style', 'nav', 'footer']):
-                        s.decompose()
-                    html_text = html_soup.get_text()
-                    pages_data.append(("-", html_text, clean_text(html_text), None))
-                    
-                    if 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url:
-                        is_src_recent_24h = True
-    
-                if not is_image_pdf:
-                    for member in WATCH_DATA:
-                        cleaned_name = member["key_name"]
-                        if not cleaned_name: continue
-                        
-                        for page_num, raw_text, cleaned_text_data, page_obj in pages_data:
-                            if is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
-                                
-                                if page_obj:
-                                    new_position_hint = get_surrounding_context_by_line(page_obj, member["name"])
-                                else:
-                                    new_position_hint = get_surrounding_context_html(member["name"], raw_text, site_name)
-                                
-                                source_detail = {
-                                    "site_name": site_name,
-                                    "url": target_url,
-                                    "page": f"該当ページ: {page_num} ページ" if page_num != "-" else "WEBページ(HTML上に直接記載)",
-                                    "new_position": new_position_hint,
-                                    "recent_24h": is_src_recent_24h
-                                }
-                                
-                                target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
-                                
-                                if cleaned_name not in target_dict:
-                                    target_dict[cleaned_name] = {
-                                        "display_name": member["name"],
-                                        "agency": member["agency"],
-                                        "memo": member["memo"],
-                                        "sources": []
-                                    }
-                                
-                                if not any(s['url'] == target_url and s['page'] == source_detail['page'] for s in target_dict[cleaned_name]['sources']):
-                                    target_dict[cleaned_name]['sources'].append(source_detail)
-                                    hits_in_site += 1
-                
-                if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
-                    warn_info = {"site_name": site_name, "url": target_url}
-                    if warn_info not in image_pdf_warnings:
-                        image_pdf_warnings.append(warn_info)
-                    continue
-                         
-            except Exception as file_error:
-                print(f"エラー詳細 ({target_url}): {file_error}")
-                continue
-        
-        overall_results[site_name]["status"] = "正常巡回完了"
-        overall_results[site_name]["summary"] = f"検証対象数: {checked_count}件 / ヒット数: {hits_in_site}件"
-        time.sleep(1.5)
-
-    # ================= 5. メールタスクの一括送信処理 =================
-    if ex_officials_hits:
-        has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in ex_officials_hits.values())
-        subject_prefix = "★" if has_24h_hit else ""
-        subject = f"{subject_prefix}【元幹部職員の異動検知】人事異動集約報告"
-        body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
-        body += build_grouped_email_body(ex_officials_hits)
-        body += "※このメールは自動監視エージェントから送信されています。"
-        email_tasks.append((subject, body, TO_ADDRESS_DETECT))
-
-    if important_positions_hits:
-        has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in important_positions_hits.values())
-        subject_prefix = "★" if has_24h_hit else ""
-        subject = f"{subject_prefix}【要監視重要ポジションの異動検知】人事異動集約報告"
-        body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
-        body += build_grouped_email_body(important_positions_hits)
-        body += "※このメールは自動監視エージェントから送信されています。"
-        email_tasks.append((subject, body, TO_ADDRESS_DETECT))
-
-    if image_pdf_warnings:
-        subject = "【要手動確認・画像PDF検出一括報告】"
-        body = (
-            f"※警告: 文字情報が抽出できない「画像化されたPDF」が検出されました。\n"
-            f"該当者が含まれている可能性があるため、手動でご確認ください。\n\n"
-        )
-        for w in image_pdf_warnings:
-            body += f"■ 発信元サイト: {w['site_name']}\n"
-            body += f"■ 対象PDFリンク: {w['url']}\n"
-            body += "----------------------------------------\n"
-        email_tasks.append((subject, body, TO_ADDRESS_DETECT))
-
-    # 定期生存報告メールの追加
-    report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
-    report_body = "人事異動の監視プログラムが実行されました。\n各省庁の巡回結果は以下の通りです。\n\n"
-    report_body += "----------------------------------------\n"
-    
-    for site, res in overall_results.items():
-        star_label = " ★" if res.get("has_24h_pdf", False) else ""
-        report_body += f"■ 省庁・サイト名: {site}\n"
-        report_body += f"  ステータス: {res['status']}\n"
-        if "summary" in res:
-            report_body += f"  処理概要: {res['summary']}{star_label}\n"
-        # 【変更】詳細ログ(details)の出力箇所を完全削除
-        report_body += "----------------------------------------\n"
-        
-    report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n"
-    report_body += "※このメールはプログラムが正常に動作していることを証明するために自動送信されています。"
-    email_tasks.append((report_subject, report_body, TO_ADDRESS_REPORT))
-    
-    if email_tasks:
-        print(f"【報告】メール送信処理を開始します（計 {len(email_tasks)} 通）...")
-        send_emails_batch(email_tasks)
-
-if __name__ == "__main__":
-    check_ministries()
+        for target_url in
