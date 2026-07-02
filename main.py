@@ -67,7 +67,6 @@ FROM_ADDRESS = "sstokyoj013100@gmail.com"
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
 TARGET_SITES = {
-    # "経済産業省(幹部名簿PDF)": "https://www.meti.go.jp/intro/data/pdf/list_ja.pdf",
     "総務省(人事・組織)": "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html",
     "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
     "農林水産省(人事異動)": "https://www.maff.go.jp/j/org/who/meibo/personnel_change/index.html",
@@ -129,21 +128,31 @@ def extract_vertical_text_from_page(page):
     words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
     return "".join([w['text'] for w in words_sorted])
 
-# 【修正】厚労省や文科省などのHTMLページで長すぎる抜き出しになる問題を解決するロジック
-def get_surrounding_context_html(name, raw_text, site_name=""):
-    # 連続する空白を1つにまとめる
-    cleaned_raw = re.sub(r'\s+', ' ', raw_text)
-    
-    # 名前の文字の間に任意の文字を挟むパターン（スペース対策）
+# 【大幅修正】HTML用の周辺テキスト抽出ロジック（ブロック単位で切り分けることで長文化を絶対阻止）
+def get_surrounding_context_html_v2(name, html_lines):
     pattern = ".*".join([re.escape(c) for c in name if c.strip()])
-    match = re.search(pattern, cleaned_raw)
     
-    if match:
-        # 左（前）は20文字、右（後ろの異動先情報）は150文字程度に絞ってピンポイント抽出
-        start = max(0, match.start() - 20)
-        end = min(len(cleaned_raw), match.end() + 150)
-        context = cleaned_raw[start:end].strip()
-        return f"... {context} ..."
+    # 該当する名前が含まれる「行・ブロック」だけを探索する
+    for line in html_lines:
+        cleaned_line = re.sub(r'\s+', ' ', line).strip()
+        if not cleaned_line: continue
+        
+        # スペースを挟んだ名前のパターンにマッチするか検証
+        match = re.search(pattern, clean_text(cleaned_line))
+        if match or (clean_text(name) in clean_text(cleaned_line)):
+            # マッチした行自体がすでに十分に短い場合はそのまま返す
+            if len(cleaned_line) <= 150:
+                return f"... {cleaned_line} ..."
+            
+            # 長い行（テーブルの1セクションなど）の場合は、名前の前後のみをピンポイントで切り抜く
+            actual_match = re.search(".*".join([re.escape(c) for c in name if c.strip()]), cleaned_line)
+            if actual_match:
+                start = max(0, actual_match.start() - 20)
+                end = min(len(cleaned_line), actual_match.end() + 100)
+                return f"... {cleaned_line[start:end].strip()} ..."
+            
+            return f"... {cleaned_line[:150].strip()} ..."
+            
     return "周辺情報の取得失敗"
 
 # PDF用の同一行抽出ロジック（右側は行末まで完全に取得）
@@ -385,6 +394,7 @@ def check_ministries():
                 pages_data = [] 
                 is_image_pdf = False
                 is_src_recent_24h = False
+                html_lines_extracted = [] # HTML用の行分割保持用リスト
                 
                 if target_url.endswith('.pdf'):
                     checked_count += 1
@@ -420,7 +430,12 @@ def check_ministries():
                     html_soup = BeautifulSoup(file_content.decode('utf-8', errors='ignore'), 'html.parser')
                     for s in html_soup(['script', 'style', 'nav', 'footer']):
                         s.decompose()
+                    
+                    # 【重要】HTMLテキストを全体で一塊にせず、ブロック要素や改行単位でリスト化する
                     html_text = html_soup.get_text()
+                    # 連続する不要な空白を消しつつ、行単位に分割して保持
+                    html_lines_extracted = [line.strip() for line in html_soup.strings if line.strip()]
+                    
                     pages_data.append(("-", html_text, clean_text(html_text), None))
                     
                     if 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url:
@@ -437,7 +452,8 @@ def check_ministries():
                                 if page_obj:
                                     new_position_hint = get_surrounding_context_by_line(page_obj, member["name"])
                                 else:
-                                    new_position_hint = get_surrounding_context_html(member["name"], raw_text, site_name)
+                                    # HTMLページの場合は、バラバラに分解した行リストから周辺情報を1行だけ探す
+                                    new_position_hint = get_surrounding_context_html_v2(member["name"], html_lines_extracted)
                                 
                                 source_detail = {
                                     "site_name": site_name,
