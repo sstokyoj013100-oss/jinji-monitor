@@ -8,6 +8,7 @@ import io
 import smtplib
 import re
 import csv
+import json
 from email.mime.text import MIMEText
 from email.utils import formatdate
 import time
@@ -17,6 +18,7 @@ from urllib.parse import urlparse, urljoin
 # ================= 1. 監視対象名簿データの構築 =================
 CSV_EX_OFFICIALS = "元幹部リスト.csv"
 CSV_IMPORTANT_POSITIONS = "重要ポジション.csv"
+HISTORY_FILE = "detection_history.json"  # 過去の検知履歴を保存するファイル
 
 def clean_text(text):
     if not text: return ""
@@ -58,6 +60,24 @@ def load_watch_data():
     return combined_data
 
 WATCH_DATA = load_watch_data()
+
+# ================= 履歴管理用関数 =================
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"履歴ファイルの読み込みに失敗しました(新規作成します): {e}")
+    return {"hits": [], "warnings": []}
+
+def save_history(history_data):
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history_data, f, ensure_ascii=False, indent=2)
+        print("検知履歴を保存しました。")
+    except Exception as e:
+        print(f"履歴ファイルの保存に失敗しました: {e}")
 
 # ================= 2. 送信設定・ターゲットURL =================
 TO_ADDRESS_DETECT = "sstokyoj@city.shimonoseki.yamaguchi.jp"
@@ -128,34 +148,26 @@ def extract_vertical_text_from_page(page):
     words_sorted = sorted(words, key=lambda w: (-round(w['x0'] / 15), w['top']))
     return "".join([w['text'] for w in words_sorted])
 
-# 【大幅修正】HTML用の周辺テキスト抽出ロジック（ブロック単位で切り分けることで長文化を絶対阻止）
 def get_surrounding_context_html_v2(name, html_lines):
     pattern = ".*".join([re.escape(c) for c in name if c.strip()])
-    
-    # 該当する名前が含まれる「行・ブロック」だけを探索する
     for line in html_lines:
         cleaned_line = re.sub(r'\s+', ' ', line).strip()
         if not cleaned_line: continue
         
-        # スペースを挟んだ名前のパターンにマッチするか検証
         match = re.search(pattern, clean_text(cleaned_line))
         if match or (clean_text(name) in clean_text(cleaned_line)):
-            # マッチした行自体がすでに十分に短い場合はそのまま返す
             if len(cleaned_line) <= 150:
                 return f"... {cleaned_line} ..."
             
-            # 長い行（テーブルの1セクションなど）の場合は、名前の前後のみをピンポイントで切り抜く
             actual_match = re.search(".*".join([re.escape(c) for c in name if c.strip()]), cleaned_line)
             if actual_match:
                 start = max(0, actual_match.start() - 20)
                 end = min(len(cleaned_line), actual_match.end() + 100)
                 return f"... {cleaned_line[start:end].strip()} ..."
-            
             return f"... {cleaned_line[:150].strip()} ..."
             
     return "周辺情報の取得失敗"
 
-# PDF用の同一行抽出ロジック（右側は行末まで完全に取得）
 def get_surrounding_context_by_line(page, member_name):
     words = page.extract_words()
     if not words: return "周辺情報の取得失敗"
@@ -177,6 +189,7 @@ def get_surrounding_context_by_line(page, member_name):
         w for w in words 
         if (base_top - tolerance) <= w['top'] <= (base_bottom + tolerance)
     ]
+    
     same_line_words_sorted = sorted(same_line_words, key=lambda w: w['x0'])
     
     line_text = " ".join([w['text'] for w in same_line_words_sorted])
@@ -312,7 +325,7 @@ def download_file_safely(session, url, headers):
                     return None
                 if chunk:
                     content.extend(chunk)
-                    
+                
                 size_limit = 52428800 if is_meti_pdf else 31457280
                 if len(content) > size_limit:
                     print(f"警告: ファイルサイズが大きすぎるためスキップします ({url})")
@@ -323,25 +336,69 @@ def download_file_safely(session, url, headers):
         print(f"ダウンロードエラー ({url}): {e}")
         return None
 
-def build_grouped_email_body(hits_dict):
-    body = ""
+# 【大幅修正】「新着情報」と「過去の履歴」を分けて成形するロジック
+def build_grouped_email_body_v2(hits_dict, history_keys):
+    new_hits_body = ""
+    old_hits_body = ""
+    
     for key_name in sorted(hits_dict.keys()):
         info = hits_dict[key_name]
-        is_recent_24h = any(src.get('recent_24h', False) for src in info['sources'])
-        flash_label = " 【★超速報: 24時間以内の新着情報】" if is_recent_24h else ""
         
-        body += f"■ 氏名: {info['display_name']}{flash_label}\n"
-        body += f"  ・ 現想定所属: {info['agency']}\n"
-        body += f"  ・ 備考: {info['memo']}\n"
-        body += f"  ・ 検知ソース:\n"
+        # この人物に紐づくソースを「完全新着」と「過去に検知済」に分類
+        new_sources = []
+        old_sources = []
         
-        for i, src in enumerate(info['sources'], 1):
-            time_info = " (24h以内新着)" if src.get('recent_24h', False) else ""
-            body += f"    [{i}] 発信元: {src['site_name']} ({src['page']}){time_info}\n"
-            body += f"        新所属(周辺テキスト): {src['new_position']}\n"
-            body += f"        掲載リンク: {src['url']}\n"
-        body += "\n"
-    return body
+        for src in info['sources']:
+            # 履歴判定のユニークキー作成（氏名 + URL + ページ/HTML記述方式）
+            history_key = f"{key_name}_{src['url']}_{src['page']}"
+            if history_key in history_keys:
+                old_sources.append(src)
+            else:
+                new_sources.append(src)
+        
+        # 新着ソースがある場合のテキスト構築
+        if new_sources:
+            is_recent_24h = any(s.get('recent_24h', False) for s in new_sources)
+            flash_label = " 【★超速報: 24時間以内の新着情報】" if is_recent_24h else ""
+            
+            new_hits_body += f"■ 氏名: {info['display_name']}{flash_label}\n"
+            new_hits_body += f"  ・ 現想定所属: {info['agency']}\n"
+            new_hits_body += f"  ・ 備考: {info['memo']}\n"
+            new_hits_body += f"  ・ 検知ソース:\n"
+            for i, src in enumerate(new_sources, 1):
+                time_info = " (24h以内新着)" if src.get('recent_24h', False) else ""
+                new_hits_body += f"    [{i}] 発信元: {src['site_name']} ({src['page']}){time_info}\n"
+                new_hits_body += f"        新所属(周辺テキスト): {src['new_position']}\n"
+                new_hits_body += f"        掲載リンク: {src['url']}\n"
+            new_hits_body += "\n"
+            
+        # 過去の履歴ソースがある場合のテキスト構築
+        if old_sources:
+            old_hits_body += f"■ 氏名: {info['display_name']} (前回以前から継続掲載中)\n"
+            old_hits_body += f"  ・ 現想定所属: {info['agency']}\n"
+            old_hits_body += f"  ・ 備考: {info['memo']}\n"
+            old_hits_body += f"  ・ 検知ソース:\n"
+            for i, src in enumerate(old_sources, 1):
+                old_hits_body += f"    [{i}] 発信元: {src['site_name']} ({src['page']})\n"
+                old_hits_body += f"        新所属(周辺テキスト): {src['new_position']}\n"
+                old_hits_body += f"        掲載リンク: {src['url']}\n"
+            old_hits_body += "\n"
+            
+    # メールの構成案に従ってドッキング
+    final_body = ""
+    if new_hits_body:
+        final_body += "========================================\n"
+        final_body += "【新着情報（前日からの差分項目）】\n"
+        final_body += "========================================\n"
+        final_body += new_hits_body
+        
+    if old_hits_body:
+        final_body += "========================================\n"
+        final_body += "【過去の検知履歴（参考・継続掲載分）】\n"
+        final_body += "========================================\n"
+        final_body += old_hits_body
+        
+    return final_body, bool(new_hits_body)
 
 # ================= 4. メイン監視処理 =================
 def check_ministries():
@@ -359,11 +416,20 @@ def check_ministries():
     
     session = create_retry_session()
     
+    # 過去の履歴を読み込み
+    history_data = load_history()
+    history_hits_set = set(history_data.get("hits", []))
+    history_warnings_set = set(history_data.get("warnings", []))
+    
     overall_results = {}
-    ex_officials_hits = {}       
+    ex_officials_hits = {}        
     important_positions_hits = {} 
     image_pdf_warnings = []     
     email_tasks = []
+    
+    # 今回新しく検知したアイテムを一時保存するためのセット
+    current_hits_keys = []
+    current_warnings_urls = []
     
     for site_name, url in TARGET_SITES.items():
         print(f"【巡回中】{site_name} をチェックしています...")
@@ -394,7 +460,7 @@ def check_ministries():
                 pages_data = [] 
                 is_image_pdf = False
                 is_src_recent_24h = False
-                html_lines_extracted = [] # HTML用の行分割保持用リスト
+                html_lines_extracted = [] 
                 
                 if target_url.endswith('.pdf'):
                     checked_count += 1
@@ -431,15 +497,13 @@ def check_ministries():
                     for s in html_soup(['script', 'style', 'nav', 'footer']):
                         s.decompose()
                     
-                    # 【重要】HTMLテキストを全体で一塊にせず、ブロック要素や改行単位でリスト化する
                     html_text = html_soup.get_text()
-                    # 連続する不要な空白を消しつつ、行単位に分割して保持
                     html_lines_extracted = [line.strip() for line in html_soup.strings if line.strip()]
                     
                     pages_data.append(("-", html_text, clean_text(html_text), None))
                     
-                    if 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url:
-                        is_src_recent_24h = True
+                if 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url:
+                    is_src_recent_24h = True
     
                 if not is_image_pdf:
                     for member in WATCH_DATA:
@@ -452,19 +516,19 @@ def check_ministries():
                                 if page_obj:
                                     new_position_hint = get_surrounding_context_by_line(page_obj, member["name"])
                                 else:
-                                    # HTMLページの場合は、バラバラに分解した行リストから周辺情報を1行だけ探す
                                     new_position_hint = get_surrounding_context_html_v2(member["name"], html_lines_extracted)
                                 
+                                page_label = f"該当ページ: {page_num} ページ" if page_num != "-" else "WEBページ(HTML上に直接記載)"
                                 source_detail = {
                                     "site_name": site_name,
                                     "url": target_url,
-                                    "page": f"該当ページ: {page_num} ページ" if page_num != "-" else "WEBページ(HTML上に直接記載)",
+                                    "page": page_label,
                                     "new_position": new_position_hint,
                                     "recent_24h": is_src_recent_24h
                                 }
                                 
                                 target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
-                                
+                               
                                 if cleaned_name not in target_dict:
                                     target_dict[cleaned_name] = {
                                         "display_name": member["name"],
@@ -476,13 +540,17 @@ def check_ministries():
                                 if not any(s['url'] == target_url and s['page'] == source_detail['page'] for s in target_dict[cleaned_name]['sources']):
                                     target_dict[cleaned_name]['sources'].append(source_detail)
                                     hits_in_site += 1
+                                    
+                                    # 今回のユニークキーを履歴保存用にキープ
+                                    current_hits_keys.append(f"{cleaned_name}_{target_url}_{page_label}")
                 
                 if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
                     warn_info = {"site_name": site_name, "url": target_url}
                     if warn_info not in image_pdf_warnings:
                         image_pdf_warnings.append(warn_info)
+                        current_warnings_urls.append(target_url)
                     continue
-                         
+                  
             except Exception as file_error:
                 print(f"エラー詳細 ({target_url}): {file_error}")
                 continue
@@ -491,38 +559,54 @@ def check_ministries():
         overall_results[site_name]["summary"] = f"検証対象数: {checked_count}件 / ヒット数: {hits_in_site}件"
         time.sleep(1.0)
 
-    # ================= 5. メールタスクの一括送信処理 =================
+    # ================= 5. 差分判定およびメール本文作成 =================
+    has_any_new_alert = False  # 「新着」が1件でもあるかどうかのフラグ
+
+    # 元幹部職員
     if ex_officials_hits:
-        has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in ex_officials_hits.values())
-        subject_prefix = "★" if has_24h_hit else ""
-        subject = f"{subject_prefix}【元幹部職員の異動検知】人事異動集約報告"
-        body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
-        body += build_grouped_email_body(ex_officials_hits)
-        body += "※このメールは自動監視エージェントから送信されています。"
-        email_tasks.append((subject, body, TO_ADDRESS_DETECT))
+        body_content, has_new_items = build_grouped_email_body_v2(ex_officials_hits, history_hits_set)
+        if has_new_items: has_any_new_alert = True
+        
+        # 新着が1件でもある、もしくは初回実行の場合のみメールタスクに追加
+        if has_new_items or not history_hits_set:
+            has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in ex_officials_hits.values())
+            subject_prefix = "★" if has_24h_hit else ""
+            subject = f"{subject_prefix}【元幹部職員の異動検知】人事異動集約報告"
+            
+            body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n" + body_content
+            body += "※このメールは自動監視エージェントから送信されています。"
+            email_tasks.append((subject, body, TO_ADDRESS_DETECT))
 
+    # 重要ポジション
     if important_positions_hits:
-        has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in important_positions_hits.values())
-        subject_prefix = "★" if has_24h_hit else ""
-        subject = f"{subject_prefix}【要監視重要ポジションの異動検知】人事異動集約報告"
-        body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
-        body += build_grouped_email_body(important_positions_hits)
-        body += "※このメールは自動監視エージェントから送信されています。"
-        email_tasks.append((subject, body, TO_ADDRESS_DETECT))
+        body_content, has_new_items = build_grouped_email_body_v2(important_positions_hits, history_hits_set)
+        if has_new_items: has_any_new_alert = True
+        
+        if has_new_items or not history_hits_set:
+            has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in important_positions_hits.values())
+            subject_prefix = "★" if has_24h_hit else ""
+            subject = f"{subject_prefix}【要監視重要ポジションの異動検知】人事異動集約報告"
+            
+            body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n" + body_content
+            body += "※このメールは自動監視エージェントから送信されています。"
+            email_tasks.append((subject, body, TO_ADDRESS_DETECT))
 
-    if image_pdf_warnings:
+    # 画像PDF警告（これまでに見たことのないURLの画像PDFがあった場合のみ新着とする）
+    new_warnings = [w for w in image_pdf_warnings if w['url'] not in history_warnings_set]
+    if new_warnings:
+        has_any_new_alert = True
         subject = "【要手動確認・画像PDF検出一括報告】"
         body = (
-            f"※警告: 文字情報が抽出できない「画像化されたPDF」が検出されました。\n"
+            f"※警告: 文字情報が抽出できない「画像化されたPDF」が新しく検出されました。\n"
             f"該当者が含まれている可能性があるため、手動でご確認ください。\n\n"
         )
-        for w in image_pdf_warnings:
+        for w in new_warnings:
             body += f"■ 発信元サイト: {w['site_name']}\n"
             body += f"■ 対象PDFリンク: {w['url']}\n"
-            body += "----------------------------------------\n"
+        body += "----------------------------------------\n"
         email_tasks.append((subject, body, TO_ADDRESS_DETECT))
 
-    # 定期生存報告メールの追加
+    # 定期生存報告メール（※進捗確認用のため、新着の有無に関わらず毎日必ず送信）
     report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
     report_body = "人事異動の監視プログラムが実行されました。\n各省庁の巡回結果は以下の通りです。\n\n"
     report_body += "----------------------------------------\n"
@@ -536,12 +620,19 @@ def check_ministries():
         report_body += "----------------------------------------\n"
         
     report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n"
+    report_body += f"前日からの新着異動情報: {'あり(通知送信)' if has_any_new_alert else 'なし(通知スキップ)'}\n"
     report_body += "※このメールはプログラムが正常に動作していることを証明するために自動送信されています。"
     email_tasks.append((report_subject, report_body, TO_ADDRESS_REPORT))
     
+    # ================= 6. 履歴の更新とメールの一括送信処理 =================
     if email_tasks:
         print(f"【報告】メール送信処理を開始します（計 {len(email_tasks)} 通）...")
         send_emails_batch(email_tasks)
+
+    # 今回検知したデータをすべて蓄積して保存
+    updated_hits = list(history_hits_set.union(current_hits_keys))
+    updated_warnings = list(history_warnings_set.union(current_warnings_urls))
+    save_history({"hits": updated_hits, "warnings": updated_warnings})
 
 if __name__ == "__main__":
     check_ministries()
