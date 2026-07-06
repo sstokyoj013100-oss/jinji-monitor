@@ -9,24 +9,24 @@ jobs:
   run-script:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    # v4 から v5 (または最新版) にアップグレード
+    - uses: actions/checkout@v5
 
+    # v5 から v6 にアップグレード
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.10'
 
-    # --- ここからキャッシュ機能の追加 ---
+    # actions/cache も v4 から v5 にアップグレード
     - name: Restore Detection History Cache
       id: history-cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: detection_history.json
-        # 毎回必ず最新のキャッシュ（前日分）をヒットさせるために動的な日付キーを使用
         key: jinji-history-${{ github.run_id }}
         restore-keys: |
           jinji-history-
-    # --- ここまで ---
 
     - name: Install dependencies
       run: pip install requests beautifulsoup4 pdfplumber
@@ -34,13 +34,13 @@ jobs:
     - name: Run logic
       env:
         PYTHONUNBUFFERED: "1"
-        GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }} # パスワードはGitHubのSecret設定を推奨
+        GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       run: python main.py
 
-    # --- 実行後に最新の履歴ファイルをキャッシュに保存 ---
+    # actions/cache/save も v5 にアップグレード
     - name: Save Detection History Cache
-      if: always() # スクリプトが途中でエラーになっても極力そこまでの履歴を保護
-      uses: actions/cache/save@v4
+      if: always()
+      uses: actions/cache/save@v5
       with:
         path: detection_history.json
         key: jinji-history-${{ github.run_id }}
