@@ -3,7 +3,7 @@ name: Jinji Monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: '7 0 * * *' # 日本時間の毎日午前0907に実行
+    - cron: '7 0 * * *' # 日本時間の毎日午前09:07に実行
 
 jobs:
   run-script:
@@ -16,10 +16,31 @@ jobs:
       with:
         python-version: '3.10'
 
+    # --- ここからキャッシュ機能の追加 ---
+    - name: Restore Detection History Cache
+      id: history-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: detection_history.json
+        # 毎回必ず最新のキャッシュ（前日分）をヒットさせるために動的な日付キーを使用
+        key: jinji-history-${{ github.run_id }}
+        restore-keys: |
+          jinji-history-
+    # --- ここまで ---
+
     - name: Install dependencies
       run: pip install requests beautifulsoup4 pdfplumber
 
     - name: Run logic
       env:
-        PYTHONUNBUFFERED: "1" # Pythonのログをリアルタイムで強制出力する設定
+        PYTHONUNBUFFERED: "1"
+        GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }} # パスワードはGitHubのSecret設定を推奨
       run: python main.py
+
+    # --- 実行後に最新の履歴ファイルをキャッシュに保存 ---
+    - name: Save Detection History Cache
+      if: always() # スクリプトが途中でエラーになっても極力そこまでの履歴を保護
+      uses: actions/cache/save@v4
+      with:
+        path: detection_history.json
+        key: jinji-history-${{ github.run_id }}
