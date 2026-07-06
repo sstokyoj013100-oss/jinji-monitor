@@ -1,0 +1,46 @@
+.github/workflows/run.ymlname: Jinji Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '7 0 * * *' # 日本時間の毎日午前09:07に実行
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+    # v4 から v5 (または最新版) にアップグレード
+    - uses: actions/checkout@v5
+
+    # v5 から v6 にアップグレード
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.10'
+
+    # actions/cache も v4 から v5 にアップグレード
+    - name: Restore Detection History Cache
+      id: history-cache
+      uses: actions/cache/restore@v5
+      with:
+        path: detection_history.json
+        key: jinji-history-${{ github.run_id }}
+        restore-keys: |
+          jinji-history-
+
+    - name: Install dependencies
+      run: pip install requests beautifulsoup4 pdfplumber
+
+    - name: Run logic
+      env:
+        PYTHONUNBUFFERED: "1"
+        GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      run: python main.py
+
+    # actions/cache/save も v5 にアップグレード
+    - name: Save Detection History Cache
+      if: always()
+      uses: actions/cache/save@v5
+      with:
+        path: detection_history.json
+        key: jinji-history-${{ github.run_id }}
