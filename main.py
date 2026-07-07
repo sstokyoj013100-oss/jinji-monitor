@@ -90,7 +90,7 @@ TO_ADDRESS_DETECT = "sstokyoj@city.shimonoseki.yamaguchi.jp"
 TO_ADDRESS_REPORT = "miura.daijirou@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
-# GitHubのSecrets（環境変数）から取得、なければ既存のデフォルトを使用
+# GitHubのSecrets（環境変数）から取得
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
 TARGET_SITES = {
@@ -286,7 +286,6 @@ def download_file_safely(session, url, headers):
             return bytes(content)
     except: return None
 
-# 【差分対応版】メール本文ビルダ
 def build_grouped_email_body_v2(hits_dict, history_keys):
     new_hits_body = ""
     old_hits_body = ""
@@ -386,6 +385,7 @@ def check_ministries():
                                 if pdf_date >= twenty_four_hours_ago:
                                     is_src_recent_24h = True
                                     overall_results[site_name]["has_24h_pdf"] = True
+                            
                             for idx, page in enumerate(pdf.pages, 1):
                                 page_raw = page.extract_text(layout=True) or ""
                                 if "農林水産省" in site_name or "経済産業省" in site_name or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0):
@@ -424,7 +424,7 @@ def check_ministries():
                         warn_info = {"site_name": site_name, "url": target_url}
                         if warn_info not in image_pdf_warnings:
                             image_pdf_warnings.append(warn_info)
-                            current_warnings_urls.append(target_url)
+                        current_warnings_urls.append(target_url)
                 except: continue
             overall_results[site_name]["status"] = "正常巡回完了"
             overall_results[site_name]["summary"] = f"検証対象数: {checked_count}件 / ヒット数: {hits_in_site}件"
