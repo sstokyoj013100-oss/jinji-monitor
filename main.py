@@ -61,17 +61,23 @@ def load_watch_data():
 
 WATCH_DATA = load_watch_data()
 
-# ================= 履歴管理用関数 =================
+# ================= 【重要修正】履歴管理用関数の安全化 =================
 def load_history():
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # 最低限のバリデーション
-                if isinstance(data, dict) and "hits" in data and "warnings" in data:
-                    return data
-        except Exception as e:
-            print(f"履歴ファイルの読み込みに失敗しました(新規作成します): {e}")
+    # ファイルが存在しない、または中身が空っぽの場合の初期化処理
+    if not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) == 0:
+        print("履歴ファイルが存在しないか空のため、新しく作成します。")
+        initial_data = {"hits": [], "warnings": []}
+        save_history(initial_data)
+        return initial_data
+        
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict) and "hits" in data and "warnings" in data:
+                return data
+    except Exception as e:
+        print(f"履歴ファイルの読み込みに失敗しました(初期化します): {e}")
+        
     return {"hits": [], "warnings": []}
 
 def save_history(history_data):
@@ -87,6 +93,7 @@ TO_ADDRESS_DETECT = "sstokyoj@city.shimonoseki.yamaguchi.jp"
 TO_ADDRESS_REPORT = "miura.daijirou@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
+# GitHubのSecrets環境変数から取得（なければデフォルトを使用）
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca")
 
 TARGET_SITES = {
@@ -412,7 +419,6 @@ def check_ministries():
     
     session = create_retry_session()
     
-    # 履歴データの安全な読み込み
     history_data = load_history()
     history_hits_set = set(history_data.get("hits", []))
     history_warnings_set = set(history_data.get("warnings", []))
@@ -428,7 +434,6 @@ def check_ministries():
     execution_error_occurred = False
     error_message = ""
 
-    # メインの巡回処理（致命的なエラー対策として全体をガード）
     try:
         for site_name, url in TARGET_SITES.items():
             print(f"【巡回中】{site_name} をチェックしています...")
@@ -603,7 +608,7 @@ def check_ministries():
         body += "----------------------------------------\n"
         email_tasks.append((subject, body, TO_ADDRESS_DETECT))
 
-    # 定期生存報告メール（※何があっても必ず送信を試みる）
+    # 定期生存報告メール
     report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
     if execution_error_occurred:
         report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
@@ -630,11 +635,10 @@ def check_ministries():
         print(f"【報告】メール送信処理を開始します（計 {len(email_tasks)} 通）...")
         send_emails_batch(email_tasks)
 
-    # 巡回が正常終了していた場合のみ履歴を更新してローカルJSONに書き出す
-    if not execution_error_occurred:
-        updated_hits = list(history_hits_set.union(current_hits_keys))
-        updated_warnings = list(history_warnings_set.union(current_warnings_urls))
-        save_history({"hits": updated_hits, "warnings": updated_warnings})
+    # 今回の実行結果に基づき履歴をマージしてローカルJSONに確定出力
+    updated_hits = list(history_hits_set.union(current_hits_keys))
+    updated_warnings = list(history_warnings_set.union(current_warnings_urls))
+    save_history({"hits": updated_hits, "warnings": updated_warnings})
 
 if __name__ == "__main__":
     check_ministries()
