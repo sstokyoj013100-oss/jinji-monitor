@@ -1,4 +1,4 @@
-.github/workflows/run.ymlname: Jinji Monitor
+name: Jinji Monitor
 
 on:
   workflow_dispatch:
@@ -9,24 +9,20 @@ jobs:
   run-script:
     runs-on: ubuntu-latest
     steps:
-    # v4 から v5 (または最新版) にアップグレード
     - uses: actions/checkout@v5
 
-    # v5 から v6 にアップグレード
     - name: Set up Python
       uses: actions/setup-python@v6
       with:
         python-version: '3.10'
 
-    # actions/cache も v4 から v5 にアップグレード
-    - name: Restore Detection History Cache
-      id: history-cache
-      uses: actions/cache/restore@v5
+    # --- 大幅変更: キャッシュではなく前日の履歴ファイル(Artifact)をダウンロードして復元 ---
+    - name: Download previous detection history
+      uses: actions/download-artifact@v4
+      continue-on-error: true # 初回実行時などで履歴がない場合でもエラーにせず次に進める
       with:
-        path: detection_history.json
-        key: jinji-history-${{ github.run_id }}
-        restore-keys: |
-          jinji-history-
+        name: jinji-history-data
+        path: .
 
     - name: Install dependencies
       run: pip install requests beautifulsoup4 pdfplumber
@@ -37,10 +33,11 @@ jobs:
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       run: python main.py
 
-    # actions/cache/save も v5 にアップグレード
-    - name: Save Detection History Cache
-      if: always()
-      uses: actions/cache/save@v5
+    # --- 大幅変更: 実行終了後、新しく更新された履歴ファイルをArtifactとしてアップロード保管 ---
+    - name: Upload updated detection history
+      if: always() # 万が一エラーが起きても現在のデータを失わないよう常に保護
+      uses: actions/upload-artifact@v4
       with:
+        name: jinji-history-data
         path: detection_history.json
-        key: jinji-history-${{ github.run_id }}
+        overwrite: true # 毎日最新データに上書き保存
