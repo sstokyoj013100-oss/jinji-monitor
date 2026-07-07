@@ -16,7 +16,7 @@ jobs:
       with:
         python-version: '3.10'
 
-    # actions/cache を使用して、前回の detection_history.json を復元する
+    # actions/cache を使用して、前回の成果物 (detection_history.json) を引き継ぐ
     - name: Restore detection history cache
       id: history-cache
       uses: actions/cache/restore@v4
@@ -29,23 +29,23 @@ jobs:
     - name: Install dependencies
       run: pip install requests beautifulsoup4 pdfplumber
 
-    # プログラムの実行 (実行ファイル名を main.py に統一)
+    # プログラムの実行 (スクリプト名: main.py)
     - name: Run logic
       env:
         PYTHONUNBUFFERED: "1"
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       run: python main.py
 
-    # ファイルが存在しない場合は空のファイルを生成
+    # 万が一、プログラムからファイルが生成されなかった場合の保険処理
     - name: Ensure history file exists
       if: always()
       run: |
         if [ ! -f "detection_history.json" ]; then
           echo '{"hits": [], "warnings": []}' > detection_history.json
-          echo "警告: プログラムからファイルが生成されなかったため、空のファイルを新規作成しました。"
+          echo "警告: detection_history.json が見つからなかったため、空のファイルを生成しました。"
         fi
 
-    # 新しく更新された detection_history.json を次回の実行のためにキャッシュとして保存
+    # 新しく更新された履歴を、次回の実行（明日）のためにキャッシュへ保存
     - name: Save detection history cache
       if: always()
       uses: actions/cache/save@v4
