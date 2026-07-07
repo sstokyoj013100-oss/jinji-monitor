@@ -16,33 +16,30 @@ jobs:
       with:
         python-version: '3.10'
 
-    # --- 【大幅改良】公式部品のエラーを回避し、安全に過去の履歴取得を試みる ---
+    # 履歴がなくてもエラーにせず進める設定
     - name: Download previous detection history safely
-      run: |
-        echo "=== 過去の履歴データの復元を試みます ==="
-        # GitHub CLIを使って、過去のアーティファクトが存在するかチェックしてダウンロード
-        gh artifact download --name jinji-history-data --dir . || echo "過去の履歴データが見つかりません（初回実行または期限切れ）。新規作成して続行します。"
-      env:
-        GH_TOKEN: ${{ github.token }}
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: jinji-history-data
+        path: .
+        missing-artifact-error: false
 
     - name: Install dependencies
       run: pip install requests beautifulsoup4 pdfplumber
 
+    # プログラムを実行
     - name: Run logic
       env:
         PYTHONUNBUFFERED: "1"
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       run: python main.py
 
-    # --- 実行終了後、新しく更新された履歴ファイルをArtifactとしてアップロード保管 ---
+    # 実行後に最新の履歴を確実に保存する
     - name: Upload updated detection history
-      if: always() # 万が一途中でエラーが起きても現在のデータを失わないよう必ず実行
-      run: |
-        if [ -f "detection_history.json" ]; then
-          echo "=== 最新の履歴データを保存します ==="
-          gh artifact upload --name jinji-history-data detection_history.json
-        else
-          echo "警告: 保存対象の履歴ファイル(detection_history.json)が生成されていません。"
-        fi
-      env:
-        GH_TOKEN: ${{ github.token }}
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: jinji-history-data
+        path: detection_history.json
+        if-no-files-found: ignore
