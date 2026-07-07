@@ -1,4 +1,4 @@
-name: Jinji Monitor
+name: Jinji Monitor　OLD
 
 on:
   workflow_dispatch:
