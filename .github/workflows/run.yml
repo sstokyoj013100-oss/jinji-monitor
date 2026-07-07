@@ -9,24 +9,19 @@ jobs:
   run-script:
     runs-on: ubuntu-latest
     steps:
-    # v4 から v5 (または最新版) にアップグレード
     - uses: actions/checkout@v5
 
-    # v5 から v6 にアップグレード
     - name: Set up Python
       uses: actions/setup-python@v6
       with:
         python-version: '3.10'
 
-    # actions/cache も v4 から v5 にアップグレード
-    - name: Restore Detection History Cache
-      id: history-cache
-      uses: actions/cache/restore@v5
+    - name: Download previous detection history
+      uses: actions/download-artifact@v4
+      continue-on-error: true
       with:
-        path: detection_history.json
-        key: jinji-history-${{ github.run_id }}
-        restore-keys: |
-          jinji-history-
+        name: jinji-history-data
+        path: .
 
     - name: Install dependencies
       run: pip install requests beautifulsoup4 pdfplumber
@@ -37,10 +32,10 @@ jobs:
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       run: python main.py
 
-    # actions/cache/save も v5 にアップグレード
-    - name: Save Detection History Cache
+    - name: Upload updated detection history
       if: always()
-      uses: actions/cache/save@v5
+      uses: actions/upload-artifact@v4
       with:
+        name: jinji-history-data
         path: detection_history.json
-        key: jinji-history-${{ github.run_id }}
+        overwrite: true
