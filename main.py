@@ -493,3 +493,148 @@ def check_ministries():
                     else:
                         checked_count += 1
                         html_soup = BeautifulSoup(file_content.decode('utf-8', errors='ignore'), 'html.parser')
+                        for s in html_soup(['script', 'style', 'nav', 'footer']):
+                            s.decompose()
+                        
+                        html_text = html_soup.get_text()
+                        html_lines_extracted = [line.strip() for line in html_soup.strings if line.strip()]
+                        
+                        pages_data.append(("-", html_text, clean_text(html_text), None))
+                        
+                    if 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url:
+                        is_src_recent_24h = True
+        
+                    if not is_image_pdf:
+                        for member in WATCH_DATA:
+                            cleaned_name = member["key_name"]
+                            if not cleaned_name: continue
+                            
+                            for page_num, raw_text, cleaned_text_data, page_obj in pages_data:
+                                if is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
+                                    
+                                    if page_obj:
+                                        new_position_hint = get_surrounding_context_by_line(page_obj, member["name"])
+                                    else:
+                                        new_position_hint = get_surrounding_context_html_v2(member["name"], html_lines_extracted)
+                                    
+                                    page_label = f"該当ページ: {page_num} ページ" if page_num != "-" else "WEBページ(HTML上に直接記載)"
+                                    source_detail = {
+                                        "site_name": site_name,
+                                        "url": target_url,
+                                        "page": page_label,
+                                        "new_position": new_position_hint,
+                                        "recent_24h": is_src_recent_24h
+                                    }
+                                    
+                                    target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
+                                   
+                                    if cleaned_name not in target_dict:
+                                        target_dict[cleaned_name] = {
+                                            "display_name": member["name"],
+                                            "agency": member["agency"],
+                                            "memo": member["memo"],
+                                            "sources": []
+                                        }
+                                    
+                                    if not any(s['url'] == target_url and s['page'] == source_detail['page'] for s in target_dict[cleaned_name]['sources']):
+                                        target_dict[cleaned_name]['sources'].append(source_detail)
+                                        hits_in_site += 1
+                                        current_hits_keys.append(f"{cleaned_name}_{target_url}_{page_label}")
+                    
+                    if is_image_pdf and ("jidou" in target_url or "jinji" in target_url or "meibo" in target_url):
+                        warn_info = {"site_name": site_name, "url": target_url}
+                        if warn_info not in image_pdf_warnings:
+                            image_pdf_warnings.append(warn_info)
+                            current_warnings_urls.append(target_url)
+                        continue
+                      
+                except Exception as file_error:
+                    print(f"エラー詳細 ({target_url}): {file_error}")
+                    continue
+            
+            overall_results[site_name]["status"] = "正常巡回完了"
+            overall_results[site_name]["summary"] = f"検証対象数: {checked_count}件 / ヒット数: {hits_in_site}件"
+            time.sleep(1.0)
+            
+    except Exception as main_err:
+        execution_error_occurred = True
+        error_message = str(main_err)
+        print(f"致命的なプログラム実行エラーが発生しました: {main_err}")
+
+    # ================= 5. 差分判定およびメール本文作成 =================
+    has_any_new_alert = False
+
+    # 元幹部職員
+    if ex_officials_hits:
+        body_content, has_new_items = build_grouped_email_body_v2(ex_officials_hits, history_hits_set)
+        if has_new_items: has_any_new_alert = True
+        if has_new_items or not history_hits_set:
+            has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in ex_officials_hits.values())
+            subject_prefix = "★" if has_24h_hit else ""
+            subject = f"{subject_prefix}【元幹部職員の異動検知】人事異動集約報告"
+            body = "以下の元幹部職員に関する人事異動情報を検知しました。\n\n" + body_content
+            body += "※このメールは自動監視エージェントから送信されています。"
+            email_tasks.append((subject, body, TO_ADDRESS_DETECT))
+
+    # 重要ポジション
+    if important_positions_hits:
+        body_content, has_new_items = build_grouped_email_body_v2(important_positions_hits, history_hits_set)
+        if has_new_items: has_any_new_alert = True
+        if has_new_items or not history_hits_set:
+            has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in important_positions_hits.values())
+            subject_prefix = "★" if has_24h_hit else ""
+            subject = f"{subject_prefix}【要監視重要ポジションの異動検知】人事異動集約報告"
+            body = "以下の重要ポジションに関する人事異動情報を検知しました。\n\n" + body_content
+            body += "※このメールは自動監視エージェントから送信されています。"
+            email_tasks.append((subject, body, TO_ADDRESS_DETECT))
+
+    # 画像PDF警告
+    new_warnings = [w for w in image_pdf_warnings if w['url'] not in history_warnings_set]
+    if new_warnings:
+        has_any_new_alert = True
+        subject = "【要手動確認・画像PDF検出一括報告】"
+        body = (
+            f"※警告: 文字情報が抽出できない「画像化されたPDF」が新しく検出されました。\n"
+            f"該当者が含まれている可能性があるため、手動でご確認ください。\n\n"
+        )
+        for w in new_warnings:
+            body += f"■ 発信元サイト: {w['site_name']}\n"
+            body += f"■ 対象PDFリンク: {w['url']}\n"
+        body += "----------------------------------------\n"
+        email_tasks.append((subject, body, TO_ADDRESS_DETECT))
+
+    # 定期生存報告メール（※何があっても必ず送信を試みる）
+    report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
+    if execution_error_occurred:
+        report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
+        report_body = f"プログラムの実行中にシステムエラーが発生しました。巡回が一部未完了の可能性があります。\n\nエラー内容: {error_message}\n\n"
+    else:
+        report_body = "人事異動の監視プログラムが正常に実行されました。\n各省庁の巡回結果は以下の通りです。\n\n"
+    
+    report_body += "----------------------------------------\n"
+    for site, res in overall_results.items():
+        star_label = " ★" if res.get("has_24h_pdf", False) else ""
+        report_body += f"■ 省庁・サイト名: {site}\n"
+        report_body += f"  ステータス: {res['status']}\n"
+        if "summary" in res:
+            report_body += f"  処理概要: {res['summary']}{star_label}\n"
+        report_body += "----------------------------------------\n"
+        
+    report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n"
+    report_body += f"前日からの新着異動情報: {'あり(通知送信)' if has_any_new_alert else 'なし(通知スキップ)'}\n"
+    report_body += "※このメールはプログラムの生存を証明するために自動送信されています。"
+    email_tasks.append((report_subject, report_body, TO_ADDRESS_REPORT))
+    
+    # ================= 6. メール送信と履歴の書き出し =================
+    if email_tasks:
+        print(f"【報告】メール送信処理を開始します（計 {len(email_tasks)} 通）...")
+        send_emails_batch(email_tasks)
+
+    # 巡回が正常終了していた場合のみ履歴を更新してローカルJSONに書き出す
+    if not execution_error_occurred:
+        updated_hits = list(history_hits_set.union(current_hits_keys))
+        updated_warnings = list(history_warnings_set.union(current_warnings_urls))
+        save_history({"hits": updated_hits, "warnings": updated_warnings})
+
+if __name__ == "__main__":
+    check_ministries()
