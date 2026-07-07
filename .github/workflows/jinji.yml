@@ -16,37 +16,39 @@ jobs:
       with:
         python-version: '3.10'
 
-    # 1. 保管庫の名前を「jinji-history-v2」に一新してダウンロードを試みる
-    - name: Download previous detection history safely
-      uses: actions/download-artifact@v4
-      continue-on-error: true
+    # actions/cache を使用して、前回の detection_history.json を復元する
+    - name: Restore detection history cache
+      id: history-cache
+      uses: actions/cache/restore@v4
       with:
-        name: jinji-history-v2
-        path: .
+        path: detection_history.json
+        key: jinji-history-v3-${{ github.run_id }}
+        restore-keys: |
+          jinji-history-v3-
 
     - name: Install dependencies
       run: pip install requests beautifulsoup4 pdfplumber
 
-    # 2. プログラムの実行
+    # プログラムの実行 (実行ファイル名を main.py に統一)
     - name: Run logic
       env:
         PYTHONUNBUFFERED: "1"
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       run: python main.py
 
-    # 3. ファイルがなければ強制生成
-    - name: Upload updated detection history
+    # ファイルが存在しない場合は空のファイルを生成
+    - name: Ensure history file exists
       if: always()
       run: |
         if [ ! -f "detection_history.json" ]; then
           echo '{"hits": [], "warnings": []}' > detection_history.json
           echo "警告: プログラムからファイルが生成されなかったため、空のファイルを新規作成しました。"
         fi
-    
-    # 4. 保管庫の保存名も「jinji-history-v2」に統一して確実にアップロード
-    - name: Archive history file to GitHub Artifacts
+
+    # 新しく更新された detection_history.json を次回の実行のためにキャッシュとして保存
+    - name: Save detection history cache
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/cache/save@v4
       with:
-        name: jinji-history-v2
         path: detection_history.json
+        key: jinji-history-v3-${{ github.run_id }}
