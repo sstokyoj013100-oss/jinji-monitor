@@ -16,28 +16,25 @@ jobs:
       with:
         python-version: '3.10'
 
-    # 1. 【超重要】前回の実行時に保存した履歴ファイルを保管庫から取り出す
+    # --- 【修正】間違った指定を削除し、安全にダウンロードをスキップする設定に修正 ---
     - name: Download previous detection history safely
       uses: actions/download-artifact@v4
-      continue-on-error: true
+      continue-on-error: true # 👈 これがあるため、ファイルがなくても自動でスキップされます
       with:
         name: jinji-history-data
         path: .
-        missing-artifact-error: false
 
     - name: Install dependencies
       run: pip install requests beautifulsoup4 pdfplumber
 
-    # 2. プログラムを実行（ここで上の取り出した履歴が読み込まれます）
     - name: Run logic
       env:
         PYTHONUNBUFFERED: "1"
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       run: python main.py
 
-    # 3. 【超重要】今回新しく更新された履歴ファイルをGitHubの保管庫に預ける
     - name: Upload updated detection history
-      if: always() # 万が一途中でエラーが起きても履歴を失わないために必ず実行
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: jinji-history-data
