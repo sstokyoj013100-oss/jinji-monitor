@@ -286,9 +286,12 @@ def download_file_safely(session, url, headers):
             return bytes(content)
     except: return None
 
+# 【差分対応版】メール本文ビルダ (件数カウントを返すよう調整、★マーク廃止)
 def build_grouped_email_body_v2(hits_dict, history_keys):
     new_hits_body = ""
     old_hits_body = ""
+    new_item_count = 0
+    
     for key_name in sorted(hits_dict.keys()):
         info = hits_dict[key_name]
         new_sources, old_sources = [], []
@@ -297,15 +300,13 @@ def build_grouped_email_body_v2(hits_dict, history_keys):
             if history_key in history_keys: old_sources.append(src)
             else: new_sources.append(src)
         if new_sources:
-            is_recent_24h = any(s.get('recent_24h', False) for s in new_sources)
-            flash_label = " 【★超速報: 24時間以内の新着情報】" if is_recent_24h else ""
-            new_hits_body += f"■ 氏名: {info['display_name']}{flash_label}\n"
+            new_item_count += len(new_sources)
+            new_hits_body += f"■ 氏名: {info['display_name']}\n"
             new_hits_body += f"  ・ 現想定所属: {info['agency']}\n"
             new_hits_body += f"  ・ 備考: {info['memo']}\n"
             new_hits_body += f"  ・ 検知ソース:\n"
             for i, src in enumerate(new_sources, 1):
-                time_info = " (24h以内新着)" if src.get('recent_24h', False) else ""
-                new_hits_body += f"    [{i}] 発信元: {src['site_name']} ({src['page']}){time_info}\n"
+                new_hits_body += f"    [{i}] 発信元: {src['site_name']} ({src['page']})\n"
                 new_hits_body += f"        新所属(周辺テキスト): {src['new_position']}\n"
                 new_hits_body += f"        掲載リンク: {src['url']}\n"
             new_hits_body += "\n"
@@ -324,7 +325,7 @@ def build_grouped_email_body_v2(hits_dict, history_keys):
         final_body += "========================================\n【新着情報（前日からの差分項目）】\n========================================\n" + new_hits_body
     if old_hits_body:
         final_body += "========================================\n【過去の検知履歴（参考・継続掲載分）】\n========================================\n" + old_hits_body
-    return final_body, bool(new_hits_body)
+    return final_body, new_item_count
 
 # ================= 4. メイン監視処理 =================
 def check_ministries():
@@ -337,7 +338,6 @@ def check_ministries():
     }
     now = datetime.now()
     thirty_days_ago = now - timedelta(days=30)
-    twenty_four_hours_ago = now - timedelta(hours=24)
     session = create_retry_session()
     
     # 履歴データの読み込み
@@ -358,7 +358,7 @@ def check_ministries():
     try:
         for site_name, url in TARGET_SITES.items():
             print(f"【巡回中】{site_name} をチェックしています...")
-            overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)", "has_24h_pdf": False}
+            overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)"}
             deep_crawl_flag = True if "総務省" in site_name or "文部科学省" in site_name else False
             current_headers = headers.copy()
             if "meti.go.jp" in url: current_headers["Referer"] = "https://www.meti.go.jp/"
@@ -371,7 +371,7 @@ def check_ministries():
                 try:
                     file_content = download_file_safely(session, target_url, headers)
                     if not file_content: continue
-                    pages_data, is_image_pdf, is_src_recent_24h, html_lines_extracted = [], False, False, []
+                    pages_data, is_image_pdf, html_lines_extracted = [], False, []
                     
                     if target_url.endswith('.pdf'):
                         checked_count += 1
@@ -382,9 +382,6 @@ def check_ministries():
                             is_static_meibo = "meibo" in target_url or "list_ja.pdf" in target_url or "幹部名簿" in site_name
                             if pdf_date and not is_static_meibo:
                                 if pdf_date < thirty_days_ago: continue
-                                if pdf_date >= twenty_four_hours_ago:
-                                    is_src_recent_24h = True
-                                    overall_results[site_name]["has_24h_pdf"] = True
                             
                             for idx, page in enumerate(pdf.pages, 1):
                                 page_raw = page.extract_text(layout=True) or ""
@@ -402,8 +399,6 @@ def check_ministries():
                         html_lines_extracted = [line.strip() for line in html_soup.strings if line.strip()]
                         pages_data.append(("-", html_text, clean_text(html_text), None))
                         
-                    if 'kanpou.npb.go.jp' in target_url or 'jihyo.co.jp' in target_url: is_src_recent_24h = True
-                    
                     if not is_image_pdf:
                         for member in WATCH_DATA:
                             cleaned_name = member["key_name"]
@@ -412,7 +407,7 @@ def check_ministries():
                                 if is_member_in_text(cleaned_name, raw_text, cleaned_text_data):
                                     new_position_hint = get_surrounding_context_by_line(page_obj, member["name"]) if page_obj else get_surrounding_context_html_v2(member["name"], html_lines_extracted)
                                     page_label = f"該当ページ: {page_num} ページ" if page_num != "-" else "WEBページ(HTML上に直接記載)"
-                                    source_detail = {"site_name": site_name, "url": target_url, "page": page_label, "new_position": new_position_hint, "recent_24h": is_src_recent_24h}
+                                    source_detail = {"site_name": site_name, "url": target_url, "page": page_label, "new_position": new_position_hint}
                                     target_dict = ex_officials_hits if member["type"] == "【元幹部職員の異動検知】" else important_positions_hits
                                     if cleaned_name not in target_dict:
                                         target_dict[cleaned_name] = {"display_name": member["name"], "agency": member["agency"], "memo": member["memo"], "sources": []}
@@ -434,37 +429,68 @@ def check_ministries():
         error_message = str(main_err)
 
     # ================= メールタスク作成と履歴の更新 =================
-    has_any_new_alert = False
+    ex_official_new_count = 0
+    important_new_count = 0
+    warnings_new_count = 0
+
+    diff_report_summary = ""
+
+    # 元幹部
     if ex_officials_hits:
-        body_content, has_new_items = build_grouped_email_body_v2(ex_officials_hits, history_hits_set)
-        if has_new_items: has_any_new_alert = True
-        if has_new_items or not history_hits_set:
-            has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in ex_officials_hits.values())
-            email_tasks.append((f"{'★' if has_24h_hit else ''}【元幹部職員の異動検知】人事異動集約報告", "以下の元幹部職員に関する人事異動情報を検知しました。\n\n" + body_content + "※このメールは自動監視エージェントから送信されています。", TO_ADDRESS_DETECT))
+        body_content, new_count = build_grouped_email_body_v2(ex_officials_hits, history_hits_set)
+        ex_official_new_count = new_count
+        if ex_official_new_count > 0 or not history_hits_set:
+            email_tasks.append(("【元幹部職員の異動検知】人事異動新規掲載報告", "以下の元幹部職員に関する人事異動情報を検知しました。\n\n" + body_content + "※このメールは自動監視エージェントから送信されています。", TO_ADDRESS_DETECT))
 
+    if ex_official_new_count > 0:
+        diff_report_summary += f"・【元幹部職員の異動検知】人事異動新規掲載報告: 新規掲載が {ex_official_new_count} 件ありました。\n"
+    else:
+        diff_report_summary += "・【元幹部職員の異動検知】人事異動新規掲載報告: 新規掲載はなかったため、メールは送信していません。\n"
+
+    # 重要ポジション
     if important_positions_hits:
-        body_content, has_new_items = build_grouped_email_body_v2(important_positions_hits, history_hits_set)
-        if has_new_items: has_any_new_alert = True
-        if has_new_items or not history_hits_set:
-            has_24h_hit = any(any(s.get('recent_24h', False) for s in info['sources']) for info in important_positions_hits.values())
-            email_tasks.append((f"{'★' if has_24h_hit else ''}【要監視重要ポジションの異動検知】人事異動集約報告", "以下の重要ポジションに関する人事異動情報を検知しました。\n\n" + body_content + "※このメールは自動監視エージェントから送信されています。", TO_ADDRESS_DETECT))
+        body_content, new_count = build_grouped_email_body_v2(important_positions_hits, history_hits_set)
+        important_new_count = new_count
+        if important_new_count > 0 or not history_hits_set:
+            email_tasks.append(("【要監視重要ポジションの異動検知】人事異動新規掲載報告", "以下の重要ポジションに関する人事異動情報を検知しました。\n\n" + body_content + "※このメールは自動監視エージェントから送信されています。", TO_ADDRESS_DETECT))
 
+    if important_new_count > 0:
+        diff_report_summary += f"・【要監視重要ポジションの異動検知】人事異動新規掲載報告: 新規掲載が {important_new_count} 件ありました。\n"
+    else:
+        diff_report_summary += "・【要監視重要ポジションの異動検知】人事異動新規掲載報告: 新規掲載はなかったため、メールは送信していません。\n"
+
+    # 画像PDF警告
     new_warnings = [w for w in image_pdf_warnings if w['url'] not in history_warnings_set]
-    if new_warnings:
-        has_any_new_alert = True
+    warnings_new_count = len(new_warnings)
+    if warnings_new_count > 0:
         body = "※警告: 文字情報が抽出できない「画像化されたPDF」が新しく検出されました。\n手動でご確認ください。\n\n"
         for w in new_warnings: body += f"■ 発信元: {w['site_name']}\n■ リンク: {w['url']}\n"
         email_tasks.append(("【要手動確認・画像PDF検出一括報告】", body + "----------------------------------------\n", TO_ADDRESS_DETECT))
+        diff_report_summary += f"・【要手動確認・画像PDF検出一括報告】: 新規検出が {warnings_new_count} 件ありました。\n"
+    else:
+        diff_report_summary += "・【要手動確認・画像PDF検出一括報告】: 新規検出はなかったため、メールは送信していません。\n"
 
+
+    # 定期巡回報告メール (TO_ADDRESS_REPORT 宛)
     report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
     if execution_error_occurred:
         report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
         report_body = f"プログラム実行エラーが発生しました。\nエラー内容: {error_message}\n\n"
     else:
         report_body = "人事異動の監視プログラムが正常に実行されました。\n\n"
+        
+    report_body += "========================================\n"
+    report_body += "【前日からの新規差分・掲載状況】\n"
+    report_body += "========================================\n"
+    report_body += diff_report_summary + "\n"
+    
+    report_body += "========================================\n"
+    report_body += "【各省庁サイトの巡回結果一覧】\n"
+    report_body += "========================================\n"
     for site, res in overall_results.items():
         report_body += f"■ {site}\n  ステータス: {res['status']}\n  {res.get('summary', '')}\n----------------------------------------\n"
-    report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n新着異動情報: {'あり' if has_any_new_alert else 'なし'}\n※自動送信メール"
+    report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n※自動送信メール"
+    
     email_tasks.append((report_subject, report_body, TO_ADDRESS_REPORT))
     
     if email_tasks:
