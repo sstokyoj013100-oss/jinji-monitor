@@ -471,8 +471,14 @@ def check_ministries():
         diff_report_summary += "・【要手動確認・画像PDF検出一括報告】: 新規検出はなかったため、メールは送信していません。\n"
 
 
-    # 定期巡回報告メール (TO_ADDRESS_REPORT 宛)
-    report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
+    # 定期巡回報告メール (TO_ADDRESS_REPORT 宛) のタイトル判定
+    has_new_diff = (ex_official_new_count > 0) or (important_new_count > 0) or (warnings_new_count > 0)
+    
+    if has_new_diff:
+        report_subject = "【新着あり】【定期報告】人事異動監視エージェント・巡回完了通知"
+    else:
+        report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
+        
     if execution_error_occurred:
         report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
         report_body = f"プログラム実行エラーが発生しました。\nエラー内容: {error_message}\n\n"
