@@ -30,6 +30,7 @@ jobs:
       run: pip install requests beautifulsoup4 pdfplumber
 
     # プログラムの実行 (スクリプト名: main.py)
+    # ※もし先ほど修正したファイル名が「main2.txt」のままであれば、ここを main2.txt に変更してください。
     - name: Run logic
       env:
         PYTHONUNBUFFERED: "1"
