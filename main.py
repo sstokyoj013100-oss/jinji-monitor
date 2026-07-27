@@ -18,7 +18,7 @@ from urllib.parse import urlparse, urljoin
 # ================= 1. 監視対象名簿データの構築 =================
 CSV_EX_OFFICIALS = "元幹部リスト.csv"
 CSV_IMPORTANT_POSITIONS = "重要ポジション.csv"
-HISTORY_FILE = "detection_history.json"  # 過去の検知履歴を保存するファイル
+HISTORY_FILE = "detection_history.json"  # 過去の検知履歴・状態を保存するファイル
 
 def clean_text(text):
     if not text: return ""
@@ -26,6 +26,8 @@ def clean_text(text):
 
 def load_watch_data():
     combined_data = []
+    
+    # 1. 元幹部リストの読み込み（通年監視）
     try:
         with open(CSV_EX_OFFICIALS, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
@@ -39,43 +41,54 @@ def load_watch_data():
                     "memo": f"元下関市: {row.get('shimonoseki_title', '').strip() or row.get('元下関役職', 'データなし')}",
                     "type": "【元幹部職員の異動検知】"
                 })
-    except Exception as e: print(f"CSVエラー1: {e}")
+    except Exception as e:
+        print(f"CSVエラー1(元幹部リスト): {e}")
 
-    try:
-        with open(CSV_IMPORTANT_POSITIONS, mode='r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                name = row.get("希望先氏名", "").strip() or row.get("氏名", "").strip()
-                if not name: continue
-                dept = row.get("要望先局等", "").strip() or row.get("要望先部署", "").strip()
-                title = row.get("希望先役職", "").strip()
-                combined_data.append({
-                    "name": name,
-                    "key_name": clean_text(name),
-                    "agency": row.get("省庁", "不明").strip(),
-                    "memo": f"重要ポジション（前職想定: {dept} {title}）",
-                    "type": "【要監視重要ポジションの異動検知】"
-                })
-    except Exception as e: print(f"CSVエラー2: {e}")
+    # 2. 重要ポジションの読み込み（6月・7月のみ監視）
+    current_month = datetime.now().month
+    if current_month in [6, 7]:
+        try:
+            with open(CSV_IMPORTANT_POSITIONS, mode='r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    name = row.get("希望先氏名", "").strip() or row.get("氏名", "").strip()
+                    if not name: continue
+                    dept = row.get("要望先局等", "").strip() or row.get("要望先部署", "").strip()
+                    title = row.get("希望先役職", "").strip()
+                    combined_data.append({
+                        "name": name,
+                        "key_name": clean_text(name),
+                        "agency": row.get("省庁", "不明").strip(),
+                        "memo": f"重要ポジション（前職想定: {dept} {title}）",
+                        "type": "【要監視重要ポジションの異動検知】"
+                    })
+        except Exception as e:
+            print(f"CSVエラー2(重要ポジション): {e}")
+    else:
+        print("【案内】現在時期外（8月〜5月）のため、重要ポジションの監視はスキップします。")
+
     return combined_data
 
 WATCH_DATA = load_watch_data()
 
 # ================= 履歴管理用関数 =================
 def load_history():
+    default_data = {"hits": [], "warnings": [], "important_status": ""}
     if not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) == 0:
         print("履歴ファイルが存在しないか空のため、新しく作成します。")
-        initial_data = {"hits": [], "warnings": []}
-        save_history(initial_data)
-        return initial_data
+        save_history(default_data)
+        return default_data
     try:
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if isinstance(data, dict) and "hits" in data and "warnings" in data:
+            if isinstance(data, dict):
+                data.setdefault("hits", [])
+                data.setdefault("warnings", [])
+                data.setdefault("important_status", "")
                 return data
     except Exception as e:
         print(f"履歴ファイルの読み込みに失敗しました(初期化します): {e}")
-    return {"hits": [], "warnings": []}
+    return default_data
 
 def save_history(history_data):
     try:
@@ -286,7 +299,6 @@ def download_file_safely(session, url, headers):
             return bytes(content)
     except: return None
 
-# 【差分対応版】メール本文ビルダ (件数カウントを返すよう調整、★マーク廃止)
 def build_grouped_email_body_v2(hits_dict, history_keys):
     new_hits_body = ""
     old_hits_body = ""
@@ -344,6 +356,7 @@ def check_ministries():
     history_data = load_history()
     history_hits_set = set(history_data.get("hits", []))
     history_warnings_set = set(history_data.get("warnings", []))
+    last_important_status = history_data.get("important_status", "")
     
     overall_results = {}
     ex_officials_hits = {}  
@@ -355,6 +368,27 @@ def check_ministries():
     execution_error_occurred = False
     error_message = ""
 
+    # --- 重要ポジションの監視開始・終了通知チェック ---
+    current_month = now.month
+    current_year_status = f"{now.year}_{current_month in [6, 7]}"
+    
+    if current_month in [6, 7] and last_important_status != f"{now.year}_active":
+        # 6月〜7月に入った時点の通知（開始・再開）
+        notice_subject = "【通知】重要ポジション監視の開始（6月下旬〜7月末期間）"
+        notice_body = f"人事異動監視システムよりお知らせです。\n\n本日（{now.strftime('%Y年%m月%d日')}）より、重要ポジション対象者の巡回監視を開始いたしました。\n※7月末日まで監視を実行します。"
+        email_tasks.append((notice_subject, notice_body, TO_ADDRESS_DETECT))
+        email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
+        history_data["important_status"] = f"{now.year}_active"
+
+    elif current_month not in [6, 7] and last_important_status.endswith("_active"):
+        # 8月に入った時点の通知（終了）
+        notice_subject = "【通知】重要ポジション監視の終了"
+        notice_body = f"人事異動監視システムよりお知らせです。\n\n7月末日を経過したため、本日（{now.strftime('%Y年%m月%d日')}）をもって重要ポジション対象者の監視を自動停止いたしました。\n※元幹部職員の監視は継続して通年実行されます。"
+        email_tasks.append((notice_subject, notice_body, TO_ADDRESS_DETECT))
+        email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
+        history_data["important_status"] = f"{now.year}_inactive"
+
+    # --- メイン巡回処理 ---
     try:
         for site_name, url in TARGET_SITES.items():
             print(f"【巡回中】{site_name} をチェックしています...")
@@ -432,32 +466,27 @@ def check_ministries():
     ex_official_new_count = 0
     important_new_count = 0
     warnings_new_count = 0
-
     diff_report_summary = ""
 
     # 元幹部
     if ex_officials_hits:
         body_content, new_count = build_grouped_email_body_v2(ex_officials_hits, history_hits_set)
         ex_official_new_count = new_count
-        if ex_official_new_count > 0 or not history_hits_set:
+        if ex_official_new_count > 0:
             email_tasks.append(("【元幹部職員の異動検知】人事異動新規掲載報告", "以下の元幹部職員に関する人事異動情報を検知しました。\n\n" + body_content + "※このメールは自動監視エージェントから送信されています。", TO_ADDRESS_DETECT))
 
     if ex_official_new_count > 0:
-        diff_report_summary += f"・【元幹部職員の異動検知】人事異動新規掲載報告: 新規掲載が {ex_official_new_count} 件ありました。\n"
-    else:
-        diff_report_summary += "・【元幹部職員の異動検知】人事異動新規掲載報告: 新規掲載はなかったため、メールは送信していません。\n"
+        diff_report_summary += f"・【元幹部職員の異動検知】: 新規掲載が {ex_official_new_count} 件ありました。\n"
 
     # 重要ポジション
     if important_positions_hits:
         body_content, new_count = build_grouped_email_body_v2(important_positions_hits, history_hits_set)
         important_new_count = new_count
-        if important_new_count > 0 or not history_hits_set:
+        if important_new_count > 0:
             email_tasks.append(("【要監視重要ポジションの異動検知】人事異動新規掲載報告", "以下の重要ポジションに関する人事異動情報を検知しました。\n\n" + body_content + "※このメールは自動監視エージェントから送信されています。", TO_ADDRESS_DETECT))
 
     if important_new_count > 0:
-        diff_report_summary += f"・【要監視重要ポジションの異動検知】人事異動新規掲載報告: 新規掲載が {important_new_count} 件ありました。\n"
-    else:
-        diff_report_summary += "・【要監視重要ポジションの異動検知】人事異動新規掲載報告: 新規掲載はなかったため、メールは送信していません。\n"
+        diff_report_summary += f"・【要監視重要ポジションの異動検知】: 新規掲載が {important_new_count} 件ありました。\n"
 
     # 画像PDF警告
     new_warnings = [w for w in image_pdf_warnings if w['url'] not in history_warnings_set]
@@ -467,45 +496,45 @@ def check_ministries():
         for w in new_warnings: body += f"■ 発信元: {w['site_name']}\n■ リンク: {w['url']}\n"
         email_tasks.append(("【要手動確認・画像PDF検出一括報告】", body + "----------------------------------------\n", TO_ADDRESS_DETECT))
         diff_report_summary += f"・【要手動確認・画像PDF検出一括報告】: 新規検出が {warnings_new_count} 件ありました。\n"
-    else:
-        diff_report_summary += "・【要手動確認・画像PDF検出一括報告】: 新規検出はなかったため、メールは送信していません。\n"
 
-
-    # 定期巡回報告メール (TO_ADDRESS_REPORT 宛) のタイトル判定
+    # 新着情報（異動検知または警告）があるかどうかの判定
     has_new_diff = (ex_official_new_count > 0) or (important_new_count > 0) or (warnings_new_count > 0)
-    
-    if has_new_diff:
-        report_subject = "【新着あり】【定期報告】人事異動監視エージェント・巡回完了通知"
-    else:
-        report_subject = "【定期報告】人事異動監視エージェント・巡回完了通知"
+
+    # 定期報告メール (TO_ADDRESS_REPORT 宛) の送信制御
+    # 新着がある場合、またはシステム実行エラーが発生した場合のみ定期報告メールを送信
+    if has_new_diff or execution_error_occurred:
+        if execution_error_occurred:
+            report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
+            report_body = f"プログラム実行エラーが発生しました。\nエラー内容: {error_message}\n\n"
+        else:
+            report_subject = "【新着あり】【定期報告】人事異動監視エージェント・巡回完了通知"
+            report_body = "人事異動の監視プログラムが正常に実行され、新着情報を検知しました。\n\n"
+            
+        report_body += "========================================\n"
+        report_body += "【前日からの新規差分・掲載状況】\n"
+        report_body += "========================================\n"
+        report_body += diff_report_summary + "\n"
         
-    if execution_error_occurred:
-        report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
-        report_body = f"プログラム実行エラーが発生しました。\nエラー内容: {error_message}\n\n"
-    else:
-        report_body = "人事異動の監視プログラムが正常に実行されました。\n\n"
+        report_body += "========================================\n"
+        report_body += "【各省庁サイトの巡回結果一覧】\n"
+        report_body += "========================================\n"
+        for site, res in overall_results.items():
+            report_body += f"■ {site}\n  ステータス: {res['status']}\n  {res.get('summary', '')}\n----------------------------------------\n"
+        report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n※自動送信メール"
         
-    report_body += "========================================\n"
-    report_body += "【前日からの新規差分・掲載状況】\n"
-    report_body += "========================================\n"
-    report_body += diff_report_summary + "\n"
-    
-    report_body += "========================================\n"
-    report_body += "【各省庁サイトの巡回結果一覧】\n"
-    report_body += "========================================\n"
-    for site, res in overall_results.items():
-        report_body += f"■ {site}\n  ステータス: {res['status']}\n  {res.get('summary', '')}\n----------------------------------------\n"
-    report_body += f"\n監視対象データ数: 計 {len(WATCH_DATA)} 名\n※自動送信メール"
-    
-    email_tasks.append((report_subject, report_body, TO_ADDRESS_REPORT))
-    
+        email_tasks.append((report_subject, report_body, TO_ADDRESS_REPORT))
+
+    # まとめてメール送信
     if email_tasks:
         send_emails_batch(email_tasks)
 
     # 履歴をマージして保存
     updated_hits = list(history_hits_set.union(current_hits_keys))
     updated_warnings = list(history_warnings_set.union(current_warnings_urls))
-    save_history({"hits": updated_hits, "warnings": updated_warnings})
+    
+    history_data["hits"] = updated_hits
+    history_data["warnings"] = updated_warnings
+    save_history(history_data)
 
 if __name__ == "__main__":
     check_ministries()
