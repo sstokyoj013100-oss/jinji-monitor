@@ -467,6 +467,7 @@ def check_ministries():
     important_new_count = 0
     warnings_new_count = 0
     diff_report_summary = ""
+    detailed_report_content = ""  # 定期報告に追加する新着の具体的内容
 
     # 元幹部
     if ex_officials_hits:
@@ -474,6 +475,7 @@ def check_ministries():
         ex_official_new_count = new_count
         if ex_official_new_count > 0:
             email_tasks.append(("【元幹部職員の異動検知】人事異動新規掲載報告", "以下の元幹部職員に関する人事異動情報を検知しました。\n\n" + body_content + "※このメールは自動監視エージェントから送信されています。", TO_ADDRESS_DETECT))
+            detailed_report_content += "【元幹部職員の新着検知内容】\n" + body_content + "\n"
 
     if ex_official_new_count > 0:
         diff_report_summary += f"・【元幹部職員の異動検知】: 新規掲載が {ex_official_new_count} 件ありました。\n"
@@ -484,6 +486,7 @@ def check_ministries():
         important_new_count = new_count
         if important_new_count > 0:
             email_tasks.append(("【要監視重要ポジションの異動検知】人事異動新規掲載報告", "以下の重要ポジションに関する人事異動情報を検知しました。\n\n" + body_content + "※このメールは自動監視エージェントから送信されています。", TO_ADDRESS_DETECT))
+            detailed_report_content += "【要監視重要ポジションの新着検知内容】\n" + body_content + "\n"
 
     if important_new_count > 0:
         diff_report_summary += f"・【要監視重要ポジションの異動検知】: 新規掲載が {important_new_count} 件ありました。\n"
@@ -496,12 +499,12 @@ def check_ministries():
         for w in new_warnings: body += f"■ 発信元: {w['site_name']}\n■ リンク: {w['url']}\n"
         email_tasks.append(("【要手動確認・画像PDF検出一括報告】", body + "----------------------------------------\n", TO_ADDRESS_DETECT))
         diff_report_summary += f"・【要手動確認・画像PDF検出一括報告】: 新規検出が {warnings_new_count} 件ありました。\n"
+        detailed_report_content += "【新着・画像PDF検出】\n" + body + "\n"
 
     # 新着情報（異動検知または警告）があるかどうかの判定
     has_new_diff = (ex_official_new_count > 0) or (important_new_count > 0) or (warnings_new_count > 0)
 
     # 定期報告メール (TO_ADDRESS_REPORT 宛) の送信制御
-    # 新着がある場合、またはシステム実行エラーが発生した場合のみ定期報告メールを送信
     if has_new_diff or execution_error_occurred:
         if execution_error_occurred:
             report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
@@ -514,6 +517,14 @@ def check_ministries():
         report_body += "【前日からの新規差分・掲載状況】\n"
         report_body += "========================================\n"
         report_body += diff_report_summary + "\n"
+        
+        # ▼▼ 新着の内容詳細を定期報告本文に追加 ▼▼
+        if detailed_report_content:
+            report_body += "========================================\n"
+            report_body += "【新着検知データ詳細】\n"
+            report_body += "========================================\n"
+            report_body += detailed_report_content + "\n"
+        # ▲▲ 追加部分終了 ▲▲
         
         report_body += "========================================\n"
         report_body += "【各省庁サイトの巡回結果一覧】\n"
