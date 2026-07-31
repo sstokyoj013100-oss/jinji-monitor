@@ -496,6 +496,11 @@ def build_grouped_email_body_v2(hits_dict, history_keys, include_old=True):
 
 # ================= 4. メイン監視処理 =================
 def check_ministries():
+    # ★ GitHub Actionsでの手動実行（workflow_dispatch）かどうかを判定
+    is_manual_run = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    if is_manual_run:
+        print("【手動実行モード】テスト実行のため「定期報告メール」のみを送信します。")
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
@@ -540,8 +545,9 @@ def check_ministries():
             f"本日（{now.strftime('%Y年%m月%d日')}）より、重要ポジション対象者の巡回監視を開始いたしました。\n"
             "※7月末日まで監視を実行します。"
         )
-        email_tasks.append((notice_subject, notice_body, TO_ADDRESS_DETECT))
-        email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
+        if not is_manual_run:
+            email_tasks.append((notice_subject, notice_body, TO_ADDRESS_DETECT))
+            email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
         history_data["important_status"] = f"{now.year}_active"
 
     elif current_month not in [6, 7] and last_important_status.endswith(
@@ -553,8 +559,9 @@ def check_ministries():
             f"7月末日を経過したため、本日（{now.strftime('%Y年%m月%d日')}）をもって重要ポジション対象者の監視を自動停止いたしました。\n"
             "※元幹部職員の監視は継続して通年実行されます。"
         )
-        email_tasks.append((notice_subject, notice_body, TO_ADDRESS_DETECT))
-        email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
+        if not is_manual_run:
+            email_tasks.append((notice_subject, notice_body, TO_ADDRESS_DETECT))
+            email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
         history_data["important_status"] = f"{now.year}_inactive"
 
     # --- メイン巡回処理 ---
@@ -715,7 +722,8 @@ def check_ministries():
             ex_officials_hits, history_hits_set, include_old=True
         )
         ex_official_new_count = new_count
-        if ex_official_new_count > 0:
+        # ★ 手動実行時は個別通知メールを送信しない
+        if ex_official_new_count > 0 and not is_manual_run:
             email_tasks.append((
                 "【元幹部職員の異動検知】人事異動新規掲載報告",
                 "以下の元幹部職員に関する人事異動情報を検知しました。\n\n"
@@ -724,9 +732,10 @@ def check_ministries():
                 TO_ADDRESS_DETECT,
             ))
 
-            report_body_content, _ = build_grouped_email_body_v2(
-                ex_officials_hits, history_hits_set, include_old=False
-            )
+        report_body_content, _ = build_grouped_email_body_v2(
+            ex_officials_hits, history_hits_set, include_old=False
+        )
+        if report_body_content:
             detailed_report_content += (
                 "【元幹部職員の新着検知内容】\n" + report_body_content + "\n"
             )
@@ -735,6 +744,8 @@ def check_ministries():
         diff_report_summary += (
             f"・【元幹部職員の異動検知】: 新規掲載が {ex_official_new_count} 件ありました。\n"
         )
+    else:
+        diff_report_summary += "・【元幹部職員の異動検知】: 新規掲載はありませんでした。\n"
 
     # 重要ポジション
     if important_positions_hits:
@@ -742,7 +753,8 @@ def check_ministries():
             important_positions_hits, history_hits_set, include_old=True
         )
         important_new_count = new_count
-        if important_new_count > 0:
+        # ★ 手動実行時は個別通知メールを送信しない
+        if important_new_count > 0 and not is_manual_run:
             email_tasks.append((
                 "【要監視重要ポジションの異動検知】人事異動新規掲載報告",
                 "以下の重要ポジションに関する人事異動情報を検知しました。\n\n"
@@ -751,9 +763,10 @@ def check_ministries():
                 TO_ADDRESS_DETECT,
             ))
 
-            report_body_content, _ = build_grouped_email_body_v2(
-                important_positions_hits, history_hits_set, include_old=False
-            )
+        report_body_content, _ = build_grouped_email_body_v2(
+            important_positions_hits, history_hits_set, include_old=False
+        )
+        if report_body_content:
             detailed_report_content += (
                 "【要監視重要ポジションの新着検知内容】\n"
                 + report_body_content
@@ -762,6 +775,8 @@ def check_ministries():
 
     if important_new_count > 0:
         diff_report_summary += f"・【要監視重要ポジションの異動検知】: 新規掲載が {important_new_count} 件ありました。\n"
+    else:
+        diff_report_summary += "・【要監視重要ポジションの異動検知】: 新規掲載はありませんでした。\n"
 
     # 画像PDF警告
     new_warnings = [
@@ -774,22 +789,21 @@ def check_ministries():
         )
         for w in new_warnings:
             body += f"■ 発信元: {w['site_name']}\n■ リンク: {w['url']}\n"
-        email_tasks.append((
-            "【要手動確認・画像PDF検出一括報告】",
-            body + "----------------------------------------\n",
-            TO_ADDRESS_DETECT,
-        ))
+        
+        # ★ 手動実行時は個別警告メールを送信しない
+        if not is_manual_run:
+            email_tasks.append((
+                "【要手動確認・画像PDF検出一括報告】",
+                body + "----------------------------------------\n",
+                TO_ADDRESS_DETECT,
+            ))
         diff_report_summary += f"・【要手動確認・画像PDF検出一括報告】: 新規検出が {warnings_new_count} 件ありました。\n"
         detailed_report_content += "【新着・画像PDF検出】\n" + body + "\n"
+    else:
+        diff_report_summary += "・【要手動確認・画像PDF検出一括報告】: 新規検出はありませんでした。\n"
 
-    has_new_diff = (
-        (ex_official_new_count > 0)
-        or (important_new_count > 0)
-        or (warnings_new_count > 0)
-    )
-
-    # 定期報告メールの送信制御
-    if has_new_diff or execution_error_occurred:
+    # ★ 定期報告メールの作成（手動実行時は「無条件」で送信、通常時は変更がある場合のみ）
+    if is_manual_run or execution_error_occurred or (ex_official_new_count > 0 or important_new_count > 0 or warnings_new_count > 0):
         if execution_error_occurred:
             report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
             report_body = (
@@ -797,11 +811,10 @@ def check_ministries():
                 f"エラー内容: {error_message}\n\n"
             )
         else:
-            report_subject = (
-                "【新着あり】【定期報告】人事異動監視エージェント・巡回完了通知"
-            )
+            manual_prefix = "【手動テスト実行】" if is_manual_run else ""
+            report_subject = f"{manual_prefix}【定期報告】人事異動監視エージェント・巡回完了通知"
             report_body = (
-                "人事異動の監視プログラムが正常に実行され、新着情報を検知しました。\n\n"
+                f"人事異動の監視プログラムが実行されました。（モード: {'手動テスト実行' if is_manual_run else '自動スケジュール実行'}）\n\n"
             )
 
         report_body += "========================================\n"
