@@ -19,7 +19,7 @@ from urllib3.util import Retry
 # ================= 1. 監視対象名簿データの構築 =================
 CSV_EX_OFFICIALS = "元幹部リスト.csv"
 CSV_IMPORTANT_POSITIONS = "重要ポジション.csv"
-HISTORY_FILE = "detection_history.json"  # 過去の検知履歴・状態を保存するファイル
+HISTORY_FILE = "detection_history.json"
 
 
 def clean_text(text):
@@ -29,39 +29,33 @@ def clean_text(text):
 
 
 def read_csv_flexible(file_path):
-    """
-    カンマ区切り・タブ区切り・1列テキストのいずれにも対応する汎用CSV読み込み関数
-    """
     rows = []
     if not os.path.exists(file_path):
         return rows
-    
+
     with open(file_path, mode="r", encoding="utf-8-sig") as f:
         content = f.read()
-        
-    # 区切り文字（カンマかタブ）の自動判定
+
     dialect = "excel"
     if "\t" in content and "," not in content:
         dialect = "excel-tab"
-        
+
     reader = csv.DictReader(io.StringIO(content), dialect=dialect)
     for row in reader:
-        # Noneのキーや空のデータを排除して整理
         cleaned_row = {k.strip(): v.strip() for k, v in row.items() if k and v}
         if cleaned_row:
             rows.append(cleaned_row)
-            
+
     return rows
 
 
 def load_watch_data():
     combined_data = []
 
-    # 1. 元幹部リストの読み込み（通年監視：名前 ＋ 下関役職）
+    # 1. 元幹部リストの読み込み
     try:
         rows = read_csv_flexible(CSV_EX_OFFICIALS)
         for row in rows:
-            # 「氏名」「name」「名前」など柔軟に対応
             name = row.get("name") or row.get("氏名") or row.get("名前", "")
             if not name:
                 continue
@@ -71,8 +65,7 @@ def load_watch_data():
                 or row.get("元下関役職")
                 or row.get("役職", "データなし")
             )
-            
-            # 所属省庁の取得（記載があれば使用）
+
             agency = (
                 row.get("agency")
                 or row.get("所属省庁")
@@ -90,7 +83,7 @@ def load_watch_data():
     except Exception as e:
         print(f"CSVエラー1(元幹部リスト): {e}")
 
-    # 2. 重要ポジションの読み込み（6月・7月・8月のみ監視：9月1日停止）
+    # 2. 重要ポジションの読み込み
     current_month = datetime.now().month
     if current_month in [6, 7, 8]:
         try:
@@ -105,7 +98,6 @@ def load_watch_data():
                 if not name:
                     continue
 
-                # 所属省庁の取得
                 agency = (
                     row.get("agency")
                     or row.get("所属省庁")
@@ -167,7 +159,6 @@ TO_ADDRESS_DETECT = "sstokyoj@city.shimonoseki.yamaguchi.jp"
 TO_ADDRESS_REPORT = "miura.daijirou@city.shimonoseki.yamaguchi.jp"
 FROM_ADDRESS = "sstokyoj013100@gmail.com"
 
-# GitHubのSecrets（環境変数）から取得
 GMAIL_APP_PASSWORD = os.environ.get(
     "GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca"
 )
@@ -364,7 +355,38 @@ def clean_and_validate_url(base_url, href_str):
     return None
 
 
+# ★ 官報専用の直近URL集約関数を追加
+def collect_kanpou_links(session, headers, days_back=7):
+    kanpou_links = []
+    base_kanpou_url = "https://kanpou.npb.go.jp/"
+    now = datetime.now()
+    
+    for i in range(days_back):
+        target_date = now - timedelta(days=i)
+        date_str = target_date.strftime("%Y%m%d")
+        
+        # 官報の標準的な掲載URL構造パターンを自動生成
+        date_url = f"https://kanpou.npb.go.jp/{date_str}/{date_str}.html"
+        try:
+            res = session.get(date_url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, "html.parser")
+                for a_tag in soup.find_all("a", href=True):
+                    href = a_tag["href"].strip()
+                    if href.endswith(".pdf") or "pdf" in href:
+                        pdf_url = clean_and_validate_url(date_url, href)
+                        if pdf_url and pdf_url not in kanpou_links:
+                            kanpou_links.append(pdf_url)
+        except Exception:
+            continue
+            
+    return kanpou_links
+
+
 def collect_links_from_url(session, url, headers, deep_crawl=False):
+    if "kanpou.npb.go.jp" in url:
+        return collect_kanpou_links(session, headers)
+
     if url.endswith(".pdf"):
         return [url]
     links = []
@@ -384,7 +406,6 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
                 or "jidou" in href
                 or "jinji" in href
                 or "meibo" in href
-                or "kanpou" in url
             ):
                 if target_url not in links:
                     links.append(target_url)
@@ -512,7 +533,6 @@ def build_grouped_email_body_v2(hits_dict, history_keys, include_old=True):
 
 # ================= 4. メイン監視処理 =================
 def check_ministries():
-    # ★ GitHub Actionsでの手動実行（workflow_dispatch）かどうかを判定
     is_manual_run = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
     if is_manual_run:
         print("【手動実行モード】テスト実行のため「定期報告メール」のみを送信します。")
@@ -533,7 +553,6 @@ def check_ministries():
     thirty_days_ago = now - timedelta(days=30)
     session = create_retry_session()
 
-    # 履歴データの読み込み
     history_data = load_history()
     history_hits_set = set(history_data.get("hits", []))
     history_warnings_set = set(history_data.get("warnings", []))
@@ -549,13 +568,10 @@ def check_ministries():
     execution_error_occurred = False
     error_message = ""
 
-    # --- 重要ポジションの監視開始・終了通知チェック ---
     current_month = now.month
 
     if current_month in [6, 7, 8] and last_important_status != f"{now.year}_active":
-        notice_subject = (
-            "【通知】重要ポジション監視の開始（6月下旬〜8月末期間）"
-        )
+        notice_subject = "【通知】重要ポジション監視の開始（6月下旬〜8月末期間）"
         notice_body = (
             "人事異動監視システムよりお知らせです。\n\n"
             f"本日（{now.strftime('%Y年%m月%d日')}）より、重要ポジション対象者の巡回監視を開始いたしました。\n"
@@ -566,9 +582,7 @@ def check_ministries():
             email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
         history_data["important_status"] = f"{now.year}_active"
 
-    elif current_month not in [6, 7, 8] and last_important_status.endswith(
-        "_active"
-    ):
+    elif current_month not in [6, 7, 8] and last_important_status.endswith("_active"):
         notice_subject = "【通知】重要ポジション監視の終了"
         notice_body = (
             "人事異動監視システムよりお知らせです。\n\n"
@@ -580,22 +594,21 @@ def check_ministries():
             email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
         history_data["important_status"] = f"{now.year}_inactive"
 
-    # --- メイン巡回処理 ---
     try:
         for site_name, url in TARGET_SITES.items():
             print(f"【巡回中】{site_name} をチェックしています...")
-            overall_results[site_name] = {
-                "status": "チェック未完了(エラーの可能性)"
-            }
+            overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)"}
             deep_crawl_flag = True if "総務省" in site_name or "文部科学省" in site_name else False
             current_headers = headers.copy()
             if "meti.go.jp" in url:
                 current_headers["Referer"] = "https://www.meti.go.jp/"
+            
             links = collect_links_from_url(
                 session, url, current_headers, deep_crawl=deep_crawl_flag
             )
-            if url not in links:
+            if url not in links and not "kanpou.npb.go.jp" in url:
                 links.insert(0, url)
+                
             checked_count, hits_in_site = 0, 0
 
             for target_url in links:
@@ -624,14 +637,16 @@ def check_ministries():
                                 or "list_ja.pdf" in target_url
                                 or "幹部名簿" in site_name
                             )
-                            if pdf_date and not is_static_meibo:
+                            if pdf_date and not is_static_meibo and "kanpou" not in target_url:
                                 if pdf_date < thirty_days_ago:
                                     continue
 
                             for idx, page in enumerate(pdf.pages, 1):
                                 page_raw = page.extract_text(layout=True) or ""
+                                # 官報や農林水産省等の縦書きPDF処理の最適化
                                 if (
                                     "農林水産省" in site_name
+                                    or "インターネット官報" in site_name
                                     or "経済産業省" in site_name
                                     or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0)
                                 ):
@@ -709,6 +724,7 @@ def check_ministries():
                         "jidou" in target_url
                         or "jinji" in target_url
                         or "meibo" in target_url
+                        or "kanpou" in target_url
                     ):
                         warn_info = {"site_name": site_name, "url": target_url}
                         if warn_info not in image_pdf_warnings:
@@ -738,7 +754,6 @@ def check_ministries():
             ex_officials_hits, history_hits_set, include_old=True
         )
         ex_official_new_count = new_count
-        # ★ 手動実行時は個別通知メールを送信しない
         if ex_official_new_count > 0 and not is_manual_run:
             email_tasks.append((
                 "【元幹部職員の異動検知】人事異動新規掲載報告",
@@ -769,7 +784,6 @@ def check_ministries():
             important_positions_hits, history_hits_set, include_old=True
         )
         important_new_count = new_count
-        # ★ 手動実行時は個別通知メールを送信しない
         if important_new_count > 0 and not is_manual_run:
             email_tasks.append((
                 "【要監視重要ポジションの異動検知】人事異動新規掲載報告",
@@ -805,8 +819,7 @@ def check_ministries():
         )
         for w in new_warnings:
             body += f"■ 発信元: {w['site_name']}\n■ リンク: {w['url']}\n"
-        
-        # ★ 手動実行時は個別警告メールを送信しない
+
         if not is_manual_run:
             email_tasks.append((
                 "【要手動確認・画像PDF検出一括報告】",
@@ -818,7 +831,7 @@ def check_ministries():
     else:
         diff_report_summary += "・【要手動確認・画像PDF検出一括報告】: 新規検出はありませんでした。\n"
 
-    # ★ 定期報告メールの作成（手動実行時は「無条件」で送信、通常時は変更がある場合のみ）
+    # 定期報告メールの作成
     if is_manual_run or execution_error_occurred or (ex_official_new_count > 0 or important_new_count > 0 or warnings_new_count > 0):
         if execution_error_occurred:
             report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
