@@ -71,20 +71,28 @@ def load_watch_data():
                 or row.get("元下関役職")
                 or row.get("役職", "データなし")
             )
+            
+            # 所属省庁の取得（記載があれば使用）
+            agency = (
+                row.get("agency")
+                or row.get("所属省庁")
+                or row.get("省庁")
+                or "元幹部職員"
+            )
 
             combined_data.append({
                 "name": name,
                 "key_name": clean_text(name),
-                "agency": "元幹部職員",
+                "agency": agency,
                 "memo": f"元下関役職: {shimonoseki_title}",
                 "type": "【元幹部職員の異動検知】",
             })
     except Exception as e:
         print(f"CSVエラー1(元幹部リスト): {e}")
 
-    # 2. 重要ポジションの読み込み（6月・7月のみ監視：名前のみ）
+    # 2. 重要ポジションの読み込み（6月・7月・8月のみ監視：9月1日停止）
     current_month = datetime.now().month
-    if current_month in [6, 7]:
+    if current_month in [6, 7, 8]:
         try:
             rows = read_csv_flexible(CSV_IMPORTANT_POSITIONS)
             for row in rows:
@@ -97,10 +105,18 @@ def load_watch_data():
                 if not name:
                     continue
 
+                # 所属省庁の取得
+                agency = (
+                    row.get("agency")
+                    or row.get("所属省庁")
+                    or row.get("省庁")
+                    or row.get("所属", "重要ポジション対象者")
+                )
+
                 combined_data.append({
                     "name": name,
                     "key_name": clean_text(name),
-                    "agency": "要監視対象",
+                    "agency": agency,
                     "memo": "重要ポジション対象者",
                     "type": "【要監視重要ポジションの異動検知】",
                 })
@@ -108,7 +124,7 @@ def load_watch_data():
             print(f"CSVエラー2(重要ポジション): {e}")
     else:
         print(
-            "【案内】現在時期外（8月〜5月）のため、重要ポジションの監視はスキップします。"
+            "【案内】現在時期外（9月〜5月）のため、重要ポジションの監視はスキップします。"
         )
 
     return combined_data
@@ -455,7 +471,7 @@ def build_grouped_email_body_v2(hits_dict, history_keys, include_old=True):
         if new_sources:
             new_item_count += len(new_sources)
             new_hits_body += f"■ 氏名: {info['display_name']}\n"
-            new_hits_body += f"  ・ 現想定所属: {info['agency']}\n"
+            new_hits_body += f"  ・ 所属省庁: {info['agency']}\n"
             new_hits_body += f"  ・ 備考: {info['memo']}\n"
             new_hits_body += "  ・ 検知ソース:\n"
             for i, src in enumerate(new_sources, 1):
@@ -469,7 +485,7 @@ def build_grouped_email_body_v2(hits_dict, history_keys, include_old=True):
             old_hits_body += (
                 f"■ 氏名: {info['display_name']} (前回以前から継続掲載中)\n"
             )
-            old_hits_body += f"  ・ 現想定所属: {info['agency']}\n"
+            old_hits_body += f"  ・ 所属省庁: {info['agency']}\n"
             old_hits_body += f"  ・ 備考: {info['memo']}\n"
             old_hits_body += "  ・ 検知ソース:\n"
             for i, src in enumerate(old_sources, 1):
@@ -536,27 +552,27 @@ def check_ministries():
     # --- 重要ポジションの監視開始・終了通知チェック ---
     current_month = now.month
 
-    if current_month in [6, 7] and last_important_status != f"{now.year}_active":
+    if current_month in [6, 7, 8] and last_important_status != f"{now.year}_active":
         notice_subject = (
-            "【通知】重要ポジション監視の開始（6月下旬〜7月末期間）"
+            "【通知】重要ポジション監視の開始（6月下旬〜8月末期間）"
         )
         notice_body = (
             "人事異動監視システムよりお知らせです。\n\n"
             f"本日（{now.strftime('%Y年%m月%d日')}）より、重要ポジション対象者の巡回監視を開始いたしました。\n"
-            "※7月末日まで監視を実行します。"
+            "※8月末日まで（9月1日停止）監視を実行します。"
         )
         if not is_manual_run:
             email_tasks.append((notice_subject, notice_body, TO_ADDRESS_DETECT))
             email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
         history_data["important_status"] = f"{now.year}_active"
 
-    elif current_month not in [6, 7] and last_important_status.endswith(
+    elif current_month not in [6, 7, 8] and last_important_status.endswith(
         "_active"
     ):
         notice_subject = "【通知】重要ポジション監視の終了"
         notice_body = (
             "人事異動監視システムよりお知らせです。\n\n"
-            f"7月末日を経過したため、本日（{now.strftime('%Y年%m月%d日')}）をもって重要ポジション対象者の監視を自動停止いたしました。\n"
+            f"8月末日を経過したため、本日（{now.strftime('%Y年%m月%d日')}）をもって重要ポジション対象者の監視を自動停止いたしました。\n"
             "※元幹部職員の監視は継続して通年実行されます。"
         )
         if not is_manual_run:
