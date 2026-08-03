@@ -361,7 +361,7 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
         res = session.get(base_url, headers=headers, timeout=20)
         res.encoding = res.apparent_encoding
         
-        pdf_matches = re.findall(r'href=["']([^"']+\.pdf)["']', res.text, re.IGNORECASE)
+        pdf_matches = re.findall(r'href=["\']([^"']+\.pdf)["\']', res.text, re.IGNORECASE)
         for pdf_path in pdf_matches:
             full_pdf_url = clean_and_validate_url(base_url, pdf_path)
             if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
