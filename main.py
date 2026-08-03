@@ -355,37 +355,51 @@ def clean_and_validate_url(base_url, href_str):
     return None
 
 
-# ★ 官報専用の直近URL集約関数を追加
-def collect_kanpou_links(session, headers, days_back=7):
-    kanpou_links = []
-    base_kanpou_url = "https://kanpou.npb.go.jp/"
-    now = datetime.now()
-    
-    for i in range(days_back):
-        target_date = now - timedelta(days=i)
-        date_str = target_date.strftime("%Y%m%d")
+# ★ インターネット官報のPDF動的リンク探索関数
+def collect_kanpou_links_dynamic(session, base_url, headers):
+    kanpou_pdf_links = []
+    try:
+        res = session.get(base_url, headers=headers, timeout=20)
+        res.encoding = res.apparent_encoding
         
-        # 官報の標準的な掲載URL構造パターンを自動生成
-        date_url = f"https://kanpou.npb.go.jp/{date_str}/{date_str}.html"
-        try:
-            res = session.get(date_url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                soup = BeautifulSoup(res.text, "html.parser")
-                for a_tag in soup.find_all("a", href=True):
-                    href = a_tag["href"].strip()
-                    if href.endswith(".pdf") or "pdf" in href:
-                        pdf_url = clean_and_validate_url(date_url, href)
-                        if pdf_url and pdf_url not in kanpou_links:
-                            kanpou_links.append(pdf_url)
-        except Exception:
-            continue
-            
-    return kanpou_links
+        # HTMLソース全体から直接.pdfリンクを再帰探索
+        pdf_matches = re.findall(r'href=["\']([^"\']+\.pdf)["\']', res.text, re.IGNORECASE)
+        for pdf_path in pdf_matches:
+            full_pdf_url = clean_and_validate_url(base_url, pdf_path)
+            if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
+                kanpou_pdf_links.append(full_pdf_url)
+
+        # トップページ内のHTMLサブリンク（本紙・号外・目録ページ）を巡回
+        soup = BeautifulSoup(res.text, "html.parser")
+        sub_pages = []
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag["href"].strip()
+            if "kanpou" in href or href.endswith(".html") or href.endswith(".htm"):
+                sub_url = clean_and_validate_url(base_url, href)
+                if sub_url and sub_url not in sub_pages and sub_url != base_url:
+                    sub_pages.append(sub_url)
+
+        # サブページからPDFリンクを回収
+        for sub_url in sub_pages[:10]:  # タイムアウト防止のため上位10件に制限
+            try:
+                sub_res = session.get(sub_url, headers=headers, timeout=15)
+                sub_pdf_matches = re.findall(r'href=["\']([^"\']+\.pdf)["\']', sub_res.text, re.IGNORECASE)
+                for pdf_path in sub_pdf_matches:
+                    full_pdf_url = clean_and_validate_url(sub_url, pdf_path)
+                    if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
+                        kanpou_pdf_links.append(full_pdf_url)
+            except Exception:
+                continue
+
+    except Exception as e:
+        print(f"官報リンク動的探索エラー: {e}")
+
+    return kanpou_pdf_links
 
 
 def collect_links_from_url(session, url, headers, deep_crawl=False):
     if "kanpou.npb.go.jp" in url:
-        return collect_kanpou_links(session, headers)
+        return collect_kanpou_links_dynamic(session, url, headers)
 
     if url.endswith(".pdf"):
         return [url]
@@ -606,7 +620,7 @@ def check_ministries():
             links = collect_links_from_url(
                 session, url, current_headers, deep_crawl=deep_crawl_flag
             )
-            if url not in links and not "kanpou.npb.go.jp" in url:
+            if url not in links and "kanpou.npb.go.jp" not in url:
                 links.insert(0, url)
                 
             checked_count, hits_in_site = 0, 0
@@ -643,7 +657,6 @@ def check_ministries():
 
                             for idx, page in enumerate(pdf.pages, 1):
                                 page_raw = page.extract_text(layout=True) or ""
-                                # 官報や農林水産省等の縦書きPDF処理の最適化
                                 if (
                                     "農林水産省" in site_name
                                     or "インターネット官報" in site_name
