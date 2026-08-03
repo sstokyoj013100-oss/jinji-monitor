@@ -1,3 +1,75 @@
+
+Gemini との会話
+手動で走らせるときは、あくまでもテストなので、結果を履歴管理されるとテストが１回しかできなくなるし、変更時の違いもわからなくなるので、手動で走らせた場合は履歴管理しないようにしたい
+
+手動実行（workflow_dispatch）時に履歴ファイル（detection_history.json）を更新しないようにするには、check_ministries() 関数の末尾にある 履歴更新・保存処理を is_manual_run の判定でスキップする 変更を加えます。  
+TXT
+
+該当箇所を以下のように修正してください。
+
+修正コード
+check_ministries() 関数の最後（# 履歴をマージして保存 付近）を次のように変更します。  
+TXT
+
+変更前
+Python
+    # 履歴をマージして保存
+    updated_hits = list(history_hits_set.union(current_hits_keys))
+    updated_warnings = list(history_warnings_set.union(current_warnings_urls))
+
+    history_data["hits"] = updated_hits
+    history_data["warnings"] = updated_warnings
+    save_history(history_data)
+変更後
+Python
+    # 履歴をマージして保存（手動実行時はテストのため履歴を保存・更新しない）
+    if not is_manual_run:
+        updated_hits = list(history_hits_set.union(current_hits_keys))
+        updated_warnings = list(history_warnings_set.union(current_warnings_urls))
+
+        history_data["hits"] = updated_hits
+        history_data["warnings"] = updated_warnings
+        save_history(history_data)
+    else:
+        print("【手動実行モード】テスト実行のため、検知履歴の更新・保存をスキップしました。")
+追加の補足提案（任意）
+上記に加え、6月〜8月の「重要ポジション監視開始・終了」のステータス管理フラグ（history_data["important_status"]）の更新も手動実行時に残したくない場合は、以下の2箇所の記述も if not is_manual_run: で囲むとより安全です。  
+TXT
+
+Python
+    # 重要ポジション監視開始時
+    if not is_manual_run:
+        history_data["important_status"] = f"{now.year}_active"
+
+    # 重要ポジション監視終了時
+    if not is_manual_run:
+        history_data["important_status"] = f"{now.year}_inactive"
+これにより、手動実行時は detection_history.json に一切の変更が加わらなくなるため、何度テストを実行しても前日との差分比較や動作確認を繰り返し行うことができます。  
+TXT
+
+全文書き直してテキストファイルで提供してもらえるかね
+
+Your TXT file is ready
+
+TXT のアイコン
+人事_手動履歴保存制御版
+ TXT 
+開く
+手動実行（workflow_dispatch）時に検知履歴（detection_history.json）や状態フラグが更新・保存されないよう修正したPythonコードの全文をテキストファイル（人事_手動履歴保存制御版.txt）として生成いたしました。  
+TXT
+
+主な修正点
+履歴保存の制御: check_ministries() 関数の末尾にある save_history(history_data) を if not is_manual_run: で囲み、手動実行時には履歴ファイルへの書き込みを行わないように変更しました。  
+TXT
+
+監視状態（ステータス）保存の制御: 6月〜8月の「重要ポジション監視開始・終了」の通知状態フラグ（history_data["important_status"]）についても、手動実行時は変更が保存されないように保護しました。  
+TXT
+
+
+
+
+Gemini は AI であり、間違えることがあります。
+
 import csv
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
@@ -361,7 +433,7 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
         res = session.get(base_url, headers=headers, timeout=20)
         res.encoding = res.apparent_encoding
         
-        pdf_matches = re.findall(r'href=["\']([^"\']+\.pdf)["\']', res.text, re.IGNORECASE)
+        pdf_matches = re.findall(r'href=["']([^"']+\.pdf)["']', res.text, re.IGNORECASE)
         for pdf_path in pdf_matches:
             full_pdf_url = clean_and_validate_url(base_url, pdf_path)
             if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
@@ -379,7 +451,7 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
         for sub_url in sub_pages[:10]:
             try:
                 sub_res = session.get(sub_url, headers=headers, timeout=15)
-                sub_pdf_matches = re.findall(r'href=["\']([^"\']+\.pdf)["\']', sub_res.text, re.IGNORECASE)
+                sub_pdf_matches = re.findall(r'href=["']([^"']+\.pdf)["']', sub_res.text, re.IGNORECASE)
                 for pdf_path in sub_pdf_matches:
                     full_pdf_url = clean_and_validate_url(sub_url, pdf_path)
                     if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
@@ -539,7 +611,7 @@ def build_grouped_email_body_v2(hits_dict, history_keys, include_old=True):
 def check_ministries():
     is_manual_run = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
     if is_manual_run:
-        print("【手動実行モード】テスト実行のため「定期報告メール」のみを送信します。")
+        print("【手動実行モード】テスト実行のため「定期報告メール」のみを送信します。履歴の更新・保存はスキップされます。")
 
     headers = {
         "User-Agent": (
@@ -584,7 +656,7 @@ def check_ministries():
         if not is_manual_run:
             email_tasks.append((notice_subject, notice_body, TO_ADDRESS_DETECT))
             email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
-        history_data["important_status"] = f"{now.year}_active"
+            history_data["important_status"] = f"{now.year}_active"
 
     elif current_month not in [6, 7, 8] and last_important_status.endswith("_active"):
         notice_subject = "【通知】重要ポジション監視の終了"
@@ -596,7 +668,7 @@ def check_ministries():
         if not is_manual_run:
             email_tasks.append((notice_subject, notice_body, TO_ADDRESS_DETECT))
             email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
-        history_data["important_status"] = f"{now.year}_inactive"
+            history_data["important_status"] = f"{now.year}_inactive"
 
     try:
         for site_name, url in TARGET_SITES.items():
@@ -889,14 +961,19 @@ def check_ministries():
     if email_tasks:
         send_emails_batch(email_tasks)
 
-    # 履歴をマージして保存
-    updated_hits = list(history_hits_set.union(current_hits_keys))
-    updated_warnings = list(history_warnings_set.union(current_warnings_urls))
+    # 履歴をマージして保存（手動実行時はテストのため履歴を保存・更新しない）
+    if not is_manual_run:
+        updated_hits = list(history_hits_set.union(current_hits_keys))
+        updated_warnings = list(history_warnings_set.union(current_warnings_urls))
 
-    history_data["hits"] = updated_hits
-    history_data["warnings"] = updated_warnings
-    save_history(history_data)
+        history_data["hits"] = updated_hits
+        history_data["warnings"] = updated_warnings
+        save_history(history_data)
+    else:
+        print("【手動実行モード】テスト実行のため、検知履歴の更新・保存をスキップしました。")
 
 
 if __name__ == "__main__":
     check_ministries()
+人事_手動履歴保存制御版.txt
+「人事_手動履歴保存制御版.txt」を表示しています。
