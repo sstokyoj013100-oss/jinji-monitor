@@ -355,21 +355,18 @@ def clean_and_validate_url(base_url, href_str):
     return None
 
 
-# ★ インターネット官報のPDF動的リンク探索関数
 def collect_kanpou_links_dynamic(session, base_url, headers):
     kanpou_pdf_links = []
     try:
         res = session.get(base_url, headers=headers, timeout=20)
         res.encoding = res.apparent_encoding
         
-        # HTMLソース全体から直接.pdfリンクを再帰探索
         pdf_matches = re.findall(r'href=["\']([^"\']+\.pdf)["\']', res.text, re.IGNORECASE)
         for pdf_path in pdf_matches:
             full_pdf_url = clean_and_validate_url(base_url, pdf_path)
             if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
                 kanpou_pdf_links.append(full_pdf_url)
 
-        # トップページ内のHTMLサブリンク（本紙・号外・目録ページ）を巡回
         soup = BeautifulSoup(res.text, "html.parser")
         sub_pages = []
         for a_tag in soup.find_all("a", href=True):
@@ -379,8 +376,7 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
                 if sub_url and sub_url not in sub_pages and sub_url != base_url:
                     sub_pages.append(sub_url)
 
-        # サブページからPDFリンクを回収
-        for sub_url in sub_pages[:10]:  # タイムアウト防止のため上位10件に制限
+        for sub_url in sub_pages[:10]:
             try:
                 sub_res = session.get(sub_url, headers=headers, timeout=15)
                 sub_pdf_matches = re.findall(r'href=["\']([^"\']+\.pdf)["\']', sub_res.text, re.IGNORECASE)
@@ -413,13 +409,12 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
             target_url = clean_and_validate_url(url, href)
             if not target_url:
                 continue
+            # 【改善1】総務省等で異動の階層ページを広く取得できるようにキー判定を拡充
             if (
                 href.endswith(".pdf")
                 or href.endswith(".html")
                 or href.endswith(".htm")
-                or "jidou" in href
-                or "jinji" in href
-                or "meibo" in href
+                or any(k in href for k in ["jidou", "jinji", "meibo", "renkei", "annai", "main_content"])
             ):
                 if target_url not in links:
                     links.append(target_url)
@@ -427,12 +422,7 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
             sub_links = []
             for l in links:
                 if (l.endswith(".html") or l.endswith(".htm")) and (
-                    "jinji" in l
-                    or "sosiki" in l
-                    or "meibo" in l
-                    or "saiyou" in l
-                    or "b_menu" in l
-                    or "intro" in l
+                    any(k in l for k in ["jinji", "sosiki", "meibo", "saiyou", "b_menu", "intro", "annai"])
                 ):
                     try:
                         time.sleep(0.5)
@@ -443,12 +433,12 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
                             sub_target = clean_and_validate_url(l, sub_href)
                             if (
                                 sub_target
-                                and sub_target.endswith(".pdf")
+                                and (sub_target.endswith(".pdf") or "jinji" in sub_target)
                                 and sub_target not in links
                                 and sub_target not in sub_links
                             ):
                                 sub_links.append(sub_target)
-                    except:
+                    except Exception:
                         continue
             links.extend(sub_links)
     except Exception as e:
@@ -646,28 +636,37 @@ def check_ministries():
                             meta = pdf.metadata or {}
                             pdf_date_str = meta.get("ModDate") or meta.get("CreationDate")
                             pdf_date = parse_pdf_date(pdf_date_str)
-                            is_static_meibo = (
+                            
+                            # 【改善2】時系列前後・メタデータ不順に対応するため総務省等の異動ページからのPDFは日付フィルタを除外
+                            is_static_or_key_site = (
                                 "meibo" in target_url
                                 or "list_ja.pdf" in target_url
                                 or "幹部名簿" in site_name
+                                or "総務省" in site_name
                             )
-                            if pdf_date and not is_static_meibo and "kanpou" not in target_url:
+                            if pdf_date and not is_static_or_key_site and "kanpou" not in target_url:
                                 if pdf_date < thirty_days_ago:
                                     continue
 
                             for idx, page in enumerate(pdf.pages, 1):
+                                # 【改善3】レイアウト付き抽出と通常抽出の両方をフォールバック取得
                                 page_raw = page.extract_text(layout=True) or ""
+                                page_raw_simple = page.extract_text(layout=False) or ""
+                                
                                 if (
                                     "農林水産省" in site_name
+                                    or "総務省" in site_name
                                     or "インターネット官報" in site_name
                                     or "経済産業省" in site_name
                                     or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0)
                                 ):
                                     v_text = extract_vertical_text_from_page(page)
                                     if v_text.strip():
-                                        page_raw = v_text
+                                        page_raw += "\n" + v_text
+                                
+                                full_page_text = page_raw + "\n" + page_raw_simple
                                 pages_data.append(
-                                    (str(idx), page_raw, clean_text(page_raw), page)
+                                    (str(idx), full_page_text, clean_text(full_page_text), page)
                                 )
                         total_raw_len = sum(len(p[1].strip()) for p in pages_data)
                         if len(file_content) > 50000 and total_raw_len < 10:
