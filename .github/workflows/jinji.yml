@@ -52,8 +52,3 @@ jobs:
       with:
         path: detection_history.json
         key: jinji-history-v3-${{ github.run_id }}
-      if: always()
-      uses: actions/cache/save@v4
-      with:
-        path: detection_history.json
-        key: jinji-history-v3-${{ github.run_id }}
