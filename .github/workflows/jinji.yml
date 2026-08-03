@@ -16,10 +16,10 @@ jobs:
       with:
         python-version: '3.10'
 
-    # actions/cache を使用して、前回の成果物 (detection_history.json) を引き継ぐ
+    # actions/cache/restore を v5 に更新（Node.js 24対応）
     - name: Restore detection history cache
       id: history-cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: detection_history.json
         key: jinji-history-v3-${{ github.run_id }}
@@ -30,7 +30,6 @@ jobs:
       run: pip install requests beautifulsoup4 pdfplumber
 
     # プログラムの実行 (スクリプト名: main.py)
-    # ※もし先ほど修正したファイル名が「main2.txt」のままであれば、ここを main2.txt に変更してください。
     - name: Run logic
       env:
         PYTHONUNBUFFERED: "1"
@@ -46,8 +45,13 @@ jobs:
           echo "警告: detection_history.json が見つからなかったため、空のファイルを生成しました。"
         fi
 
-    # 新しく更新された履歴を、次回の実行（明日）のためにキャッシュへ保存
+    # actions/cache/save を v5 に更新（Node.js 24対応）
     - name: Save detection history cache
+      if: always()
+      uses: actions/cache/save@v5
+      with:
+        path: detection_history.json
+        key: jinji-history-v3-${{ github.run_id }}
       if: always()
       uses: actions/cache/save@v4
       with:
