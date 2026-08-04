@@ -422,8 +422,8 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
             sub_links = []
             for l in links:
                 if (l.endswith(".html") or l.endswith(".htm")) and (
-                    any(k in l for k in ["jinji", "sosiki", "meibo", "saiyou", "b_menu", "intro", "annai"])
-                ):
+    any(k in l for k in ["jinji", "sosiki", "meibo", "saiyou", "b_menu", "intro", "annai", "jinji_news"])
+):
                     try:
                         time.sleep(0.5)
                         sub_res = session.get(l, headers=headers, timeout=20)
@@ -602,7 +602,7 @@ def check_ministries():
         for site_name, url in TARGET_SITES.items():
             print(f"【巡回中】{site_name} をチェックしています...")
             overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)"}
-            deep_crawl_flag = True if "総務省" in site_name or "文部科学省" in site_name else False
+            deep_crawl_flag = True if any(k in site_name for k in ["総務省", "文部科学省", "時評"]) else False
             current_headers = headers.copy()
             if "meti.go.jp" in url:
                 current_headers["Referer"] = "https://www.meti.go.jp/"
