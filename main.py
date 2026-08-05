@@ -403,6 +403,20 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
     return kanpou_pdf_links
 
 
+def is_old_archive_link(href_url):
+    """過去数年分より前のアーカイブURLかどうか判定する（過剰ヒット防止）"""
+    now_year = datetime.now().year
+    valid_years = {str(now_year), str(now_year - 1)}  # 当年と前年のみ許可
+    
+    # URLの中に 2010〜2023 などの古い年号が含まれる場合は除外
+    year_matches = re.findall(r"/(20\d{2})/", href_url)
+    if year_matches:
+        for y in year_matches:
+            if y not in valid_years:
+                return True
+    return False
+
+
 def collect_links_from_url(session, url, headers, deep_crawl=False):
     if "kanpou.npb.go.jp" in url:
         return collect_kanpou_links_dynamic(session, url, headers)
@@ -414,43 +428,58 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
         res = session.get(url, headers=headers, timeout=20)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
+        
+        # 広範なキーワードで記者発表/人事/異動リンクを抽出
+        keywords = [
+            "jidou", "jinji", "meibo", "renkei", "annai", "main_content",
+            "kisha", "press", "release", "happyou", "00", "index", "list"
+        ]
+
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"].strip()
             target_url = clean_and_validate_url(url, href)
             if not target_url:
                 continue
-            # 地方整備局などの「記者発表(kisha/press)」キーワード等も網羅
+            
+            # 北陸等の古いアーカイブPDFの無限増殖を抑制
+            if is_old_archive_link(target_url):
+                continue
+
             if (
                 href.endswith(".pdf")
                 or href.endswith(".html")
                 or href.endswith(".htm")
-                or any(k in href for k in ["jidou", "jinji", "meibo", "renkei", "annai", "main_content", "kisha", "press", "release"])
+                or any(k in href.lower() for k in keywords)
             ):
                 if target_url not in links:
                     links.append(target_url)
+
         if deep_crawl:
             sub_links = []
-            for l in links:
-                if (l.endswith(".html") or l.endswith(".htm")) and (
-                    any(k in l for k in ["jinji", "sosiki", "meibo", "saiyou", "b_menu", "intro", "annai", "jinji_news", "kisha", "press"])
-                ):
+            # 0件対策: 下層ページをより積極的に深掘り
+            for l in links[:30]:  # 上位30個のHTMLページを第2層としてチェック
+                if (l.endswith(".html") or l.endswith(".htm") or l.endswith("/")) and not is_old_archive_link(l):
                     try:
-                        time.sleep(0.5)
-                        sub_res = session.get(l, headers=headers, timeout=20)
+                        time.sleep(0.3)
+                        sub_res = session.get(l, headers=headers, timeout=15)
+                        sub_res.encoding = sub_res.apparent_encoding
                         sub_soup = BeautifulSoup(sub_res.text, "html.parser")
                         for sub_a in sub_soup.find_all("a", href=True):
                             sub_href = sub_a["href"].strip()
                             sub_target = clean_and_validate_url(l, sub_href)
+                            if not sub_target or is_old_archive_link(sub_target):
+                                continue
+
                             if (
-                                sub_target
-                                and (sub_target.endswith(".pdf") or "jinji" in sub_target or "kisha" in sub_target)
-                                and sub_target not in links
-                                and sub_target not in sub_links
+                                sub_target.endswith(".pdf")
+                                or any(k in sub_target.lower() for k in ["jinji", "kisha", "press", "happyou", "release", "00"])
                             ):
-                                sub_links.append(sub_target)
+                                if sub_target not in links and sub_target not in sub_links:
+                                    sub_links.append(sub_target)
                     except Exception:
                         continue
             links.extend(sub_links)
+
     except Exception as e:
         print(f"リンク収集エラー ({url}): {e}")
     return links
@@ -612,7 +641,10 @@ def check_ministries():
         for site_name, url in TARGET_SITES.items():
             print(f"【巡回中】{site_name} をチェックしています...")
             overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)"}
+            
+            # 地方整備局および主要省庁は全て深掘り（deep_crawl）を有効化
             deep_crawl_flag = True if any(k in site_name for k in ["総務省", "文部科学省", "時評", "地方整備局"]) else False
+            
             current_headers = headers.copy()
             if "meti.go.jp" in url:
                 current_headers["Referer"] = "https://www.meti.go.jp/"
@@ -759,7 +791,7 @@ def check_ministries():
             overall_results[site_name][
                 "summary"
             ] = f"検証対象数: {checked_count}件 / ヒット数: {hits_in_site}件"
-            time.sleep(1.0)
+            time.sleep(0.5)
     except Exception as main_err:
         execution_error_occurred = True
         error_message = str(main_err)
