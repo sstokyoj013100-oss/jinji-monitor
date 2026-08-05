@@ -199,7 +199,7 @@ TARGET_SITES = {
 def create_retry_session():
     session = requests.Session()
     retries = Retry(
-        total=2, backoff_factor=1, status_forcelist=[500, 502, 503, 504]
+        total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504]
     )
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("http://", adapter)
@@ -371,7 +371,7 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
         res = session.get(base_url, headers=headers, timeout=20)
         res.encoding = res.apparent_encoding
         
-        pdf_matches = re.findall(r"""href=["']([^"']+\.pdf)["']""", res.text, re.IGNORECASE)
+        pdf_matches = re.findall(r"""href=["']([^"']+\.pdf(?:\?[^"']*)?)["']""", res.text, re.IGNORECASE)
         for pdf_path in pdf_matches:
             full_pdf_url = clean_and_validate_url(base_url, pdf_path)
             if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
@@ -389,7 +389,7 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
         for sub_url in sub_pages[:10]:
             try:
                 sub_res = session.get(sub_url, headers=headers, timeout=15)
-                sub_pdf_matches = re.findall(r"""href=["']([^"']+\.pdf)["']""", sub_res.text, re.IGNORECASE)
+                sub_pdf_matches = re.findall(r"""href=["']([^"']+\.pdf(?:\?[^"']*)?)["']""", sub_res.text, re.IGNORECASE)
                 for pdf_path in sub_pdf_matches:
                     full_pdf_url = clean_and_validate_url(sub_url, pdf_path)
                     if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
@@ -406,9 +406,8 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
 def is_old_archive_link(href_url):
     """過去数年分より前のアーカイブURLかどうか判定する（過剰ヒット防止）"""
     now_year = datetime.now().year
-    valid_years = {str(now_year), str(now_year - 1)}  # 当年と前年のみ許可
+    valid_years = {str(now_year), str(now_year - 1)}
     
-    # URLの中に 2010〜2023 などの古い年号が含まれる場合は除外
     year_matches = re.findall(r"/(20\d{2})/", href_url)
     if year_matches:
         for y in year_matches:
@@ -417,91 +416,156 @@ def is_old_archive_link(href_url):
     return False
 
 
+def generate_regional_fallback_urls(base_url):
+    """0件対策：整備局の構造に合わせて補完用サブURL候補を生成"""
+    now = datetime.now()
+    year_str = now.strftime("%Y")
+    yy_str = now.strftime("%y")
+    month_str = now.strftime("%m")
+    
+    fallbacks = []
+    if "thr.mlit.go.jp" in base_url:  # 東北
+        fallbacks.extend([
+            urljoin(base_url, f"press/{year_str}/"),
+            urljoin(base_url, "press/"),
+            urljoin(base_url, "kisha.html")
+        ])
+    elif "ktr.mlit.go.jp" in base_url:  # 関東
+        fallbacks.extend([
+            urljoin(base_url, f"kisha_{year_str}.html"),
+            urljoin(base_url, f"date/{year_str}/"),
+            urljoin(base_url, "press/")
+        ])
+    elif "cbr.mlit.go.jp" in base_url:  # 中部
+        fallbacks.extend([
+            urljoin(base_url, f"press/{year_str}/"),
+            urljoin(base_url, f"kisha/{year_str}/"),
+            urljoin(base_url, "press_release/")
+        ])
+    elif "skr.mlit.go.jp" in base_url:  # 四国
+        fallbacks.extend([
+            urljoin(base_url, f"press/{year_str}/"),
+            urljoin(base_url, "press/")
+        ])
+    elif "qsr.mlit.go.jp" in base_url:  # 九州
+        fallbacks.extend([
+            urljoin(base_url, f"site_files/file/kisha/{year_str}/"),
+            urljoin(base_url, "press/")
+        ])
+    elif "cgr.mlit.go.jp" in base_url:  # 中国
+        fallbacks.extend([
+            urljoin(base_url, f"kisha/{year_str}/"),
+            urljoin(base_url, "press/")
+        ])
+    elif "kkr.mlit.go.jp" in base_url:  # 近畿
+        fallbacks.extend([
+            urljoin(base_url, f"kisha/pdf/{year_str}/"),
+            urljoin(base_url, "press/")
+        ])
+    return fallbacks
+
+
 def collect_links_from_url(session, url, headers, deep_crawl=False):
     if "kanpou.npb.go.jp" in url:
         return collect_kanpou_links_dynamic(session, url, headers)
 
-    if url.endswith(".pdf"):
+    parsed_url = urlparse(url)
+    if parsed_url.path.lower().endswith(".pdf"):
         return [url]
-    links = []
-    try:
-        res = session.get(url, headers=headers, timeout=20)
-        res.encoding = res.apparent_encoding
-        soup = BeautifulSoup(res.text, "html.parser")
         
-        # 広範なキーワードで記者発表/人事/異動リンクを抽出
-        keywords = [
-            "jidou", "jinji", "meibo", "renkei", "annai", "main_content",
-            "kisha", "press", "release", "happyou", "00", "index", "list"
-        ]
+    links = []
+    urls_to_scan = [url]
+    
+    # 0件の整備局対策: サブURL候補を事前に巡回候補へ追加
+    if "mlit.go.jp" in url and "地方整備局" in str(url):
+        urls_to_scan.extend(generate_regional_fallback_urls(url))
 
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"].strip()
-            target_url = clean_and_validate_url(url, href)
-            if not target_url:
-                continue
+    for scan_target in set(urls_to_scan):
+        try:
+            res = session.get(scan_target, headers=headers, timeout=20)
+            res.encoding = res.apparent_encoding
+            soup = BeautifulSoup(res.text, "html.parser")
             
-            # 北陸等の古いアーカイブPDFの無限増殖を抑制
-            if is_old_archive_link(target_url):
-                continue
+            keywords = [
+                "jidou", "jinji", "meibo", "renkei", "annai", "main_content",
+                "kisha", "press", "release", "happyou", "00", "index", "list",
+                "pdf", "html", "htm"
+            ]
 
-            if (
-                href.endswith(".pdf")
-                or href.endswith(".html")
-                or href.endswith(".htm")
-                or any(k in href.lower() for k in keywords)
-            ):
-                if target_url not in links:
-                    links.append(target_url)
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag["href"].strip()
+                target_url = clean_and_validate_url(scan_target, href)
+                if not target_url or is_old_archive_link(target_url):
+                    continue
 
-        if deep_crawl:
-            sub_links = []
-            # 0件対策: 下層ページをより積極的に深掘り
-            for l in links[:30]:  # 上位30個のHTMLページを第2層としてチェック
-                if (l.endswith(".html") or l.endswith(".htm") or l.endswith("/")) and not is_old_archive_link(l):
-                    try:
-                        time.sleep(0.3)
-                        sub_res = session.get(l, headers=headers, timeout=15)
-                        sub_res.encoding = sub_res.apparent_encoding
-                        sub_soup = BeautifulSoup(sub_res.text, "html.parser")
-                        for sub_a in sub_soup.find_all("a", href=True):
-                            sub_href = sub_a["href"].strip()
-                            sub_target = clean_and_validate_url(l, sub_href)
-                            if not sub_target or is_old_archive_link(sub_target):
-                                continue
+                href_lower = href.lower()
+                clean_path = urlparse(target_url).path.lower()
+                
+                if (
+                    clean_path.endswith(".pdf")
+                    or clean_path.endswith(".html")
+                    or clean_path.endswith(".htm")
+                    or any(k in href_lower for k in keywords)
+                ):
+                    if target_url not in links:
+                        links.append(target_url)
 
-                            if (
-                                sub_target.endswith(".pdf")
-                                or any(k in sub_target.lower() for k in ["jinji", "kisha", "press", "happyou", "release", "00"])
-                            ):
-                                if sub_target not in links and sub_target not in sub_links:
-                                    sub_links.append(sub_target)
-                    except Exception:
-                        continue
-            links.extend(sub_links)
+            if deep_crawl:
+                sub_links = []
+                # 地方整備局の場合は深掘り件数上限を拡大（最大60ページ）
+                scan_limit = 60 if "mlit.go.jp" in scan_target else 30
+                for l in links[:scan_limit]:
+                    l_path = urlparse(l).path.lower()
+                    if (l_path.endswith(".html") or l_path.endswith(".htm") or l_path.endswith("/")) and not is_old_archive_link(l):
+                        try:
+                            time.sleep(0.2)
+                            sub_res = session.get(l, headers=headers, timeout=15)
+                            sub_res.encoding = sub_res.apparent_encoding
+                            sub_soup = BeautifulSoup(sub_res.text, "html.parser")
+                            for sub_a in sub_soup.find_all("a", href=True):
+                                sub_href = sub_a["href"].strip()
+                                sub_target = clean_and_validate_url(l, sub_href)
+                                if not sub_target or is_old_archive_link(sub_target):
+                                    continue
 
-    except Exception as e:
-        print(f"リンク収集エラー ({url}): {e}")
-    return links
+                                sub_path = urlparse(sub_target).path.lower()
+                                if (
+                                    sub_path.endswith(".pdf")
+                                    or any(k in sub_target.lower() for k in ["jinji", "kisha", "press", "happyou", "release", "00"])
+                                ):
+                                    if sub_target not in links and sub_target not in sub_links:
+                                        sub_links.append(sub_target)
+                        except Exception:
+                            continue
+                links.extend(sub_links)
+
+        except Exception as e:
+            print(f"リンク収集エラー ({scan_target}): {e}")
+
+    return list(dict.fromkeys(links))
 
 
 def download_file_safely(session, url, headers):
     try:
         is_meti = "meti.go.jp" in url
-        is_meti_pdf = is_meti and url.endswith(".pdf")
+        parsed_path = urlparse(url).path.lower()
+        is_pdf = parsed_path.endswith(".pdf")
+        
         current_headers = headers.copy()
         if is_meti:
             current_headers["Referer"] = "https://www.meti.go.jp/"
-            if is_meti_pdf:
+            if is_pdf:
                 current_headers["Accept"] = "application/pdf,*/*"
-        connect_timeout = 180 if is_meti_pdf else 20
-        download_limit_time = 180 if is_meti_pdf else 20
+                
+        connect_timeout = 180 if (is_meti and is_pdf) else 20
+        download_limit_time = 180 if (is_meti and is_pdf) else 20
+        
         with session.get(
             url, headers=current_headers, timeout=connect_timeout, stream=True
         ) as res:
             res.raise_for_status()
             content_type = res.headers.get("Content-Type", "")
-            if is_meti_pdf and "pdf" not in content_type.lower():
+            if is_pdf and "pdf" not in content_type.lower() and "octet-stream" not in content_type.lower():
                 return None
             content = bytearray()
             start_time = time.time()
@@ -510,7 +574,7 @@ def download_file_safely(session, url, headers):
                     return None
                 if chunk:
                     content.extend(chunk)
-                size_limit = 52428800 if is_meti_pdf else 31457280
+                size_limit = 52428800 if (is_meti and is_pdf) else 31457280
                 if len(content) > size_limit:
                     return None
             return bytes(content)
@@ -658,10 +722,13 @@ def check_ministries():
             checked_count, hits_in_site = 0, 0
 
             for target_url in links:
+                parsed_target = urlparse(target_url)
+                target_path = parsed_target.path.lower()
+                
                 if not (
-                    target_url.endswith(".pdf")
-                    or target_url.endswith(".html")
-                    or target_url.endswith(".htm")
+                    target_path.endswith(".pdf")
+                    or target_path.endswith(".html")
+                    or target_path.endswith(".htm")
                     or "kanpou.npb.go.jp" in target_url
                     or "jihyo.co.jp" in target_url
                 ):
@@ -672,7 +739,7 @@ def check_ministries():
                         continue
                     pages_data, is_image_pdf, html_lines_extracted = [], False, []
 
-                    if target_url.endswith(".pdf"):
+                    if target_path.endswith(".pdf"):
                         checked_count += 1
                         with pdfplumber.open(io.BytesIO(file_content)) as pdf:
                             meta = pdf.metadata or {}
@@ -932,7 +999,7 @@ def check_ministries():
     if email_tasks:
         send_emails_batch(email_tasks)
 
-    # 履歴をマージして保存（手動実行時はテストのため履歴を保存・更新しない）
+    # 履歴をマージして保存
     if not is_manual_run:
         updated_hits = list(history_hits_set.union(current_hits_keys))
         updated_warnings = list(history_warnings_set.union(current_warnings_urls))
