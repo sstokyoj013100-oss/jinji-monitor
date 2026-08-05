@@ -417,11 +417,9 @@ def is_old_archive_link(href_url):
 
 
 def generate_regional_fallback_urls(base_url):
-    """0件対策：整備局の構造に合わせて補完用サブURL候補を生成"""
+    """地方整備局限定の補完ロジック"""
     now = datetime.now()
     year_str = now.strftime("%Y")
-    yy_str = now.strftime("%y")
-    month_str = now.strftime("%m")
     
     fallbacks = []
     if "thr.mlit.go.jp" in base_url:  # 東北
@@ -476,9 +474,11 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
     links = []
     urls_to_scan = [url]
     
-    # 0件の整備局対策: サブURL候補を事前に巡回候補へ追加
+    # 地方整備局限定でフォールバックサブURLを生成
     if "mlit.go.jp" in url and "地方整備局" in str(url):
         urls_to_scan.extend(generate_regional_fallback_urls(url))
+
+    is_soumu = "soumu.go.jp" in url
 
     for scan_target in set(urls_to_scan):
         try:
@@ -486,11 +486,14 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
             res.encoding = res.apparent_encoding
             soup = BeautifulSoup(res.text, "html.parser")
             
-            keywords = [
-                "jidou", "jinji", "meibo", "renkei", "annai", "main_content",
-                "kisha", "press", "release", "happyou", "00", "index", "list",
-                "pdf", "html", "htm"
-            ]
+            # 総務省用（過剰拡大防止のための厳格キーワード）と一般用を分離
+            if is_soumu:
+                keywords = ["jinji", "houdou", "meibo", "shoukyou", "idou", "pdf"]
+            else:
+                keywords = [
+                    "jidou", "jinji", "meibo", "renkei", "annai", "main_content",
+                    "kisha", "press", "release", "happyou", "pdf", "html", "htm"
+                ]
 
             for a_tag in soup.find_all("a", href=True):
                 href = a_tag["href"].strip()
@@ -501,6 +504,11 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
                 href_lower = href.lower()
                 clean_path = urlparse(target_url).path.lower()
                 
+                # 総務省の場合、組織案内や全般ニュースなどの無関係ページを除外
+                if is_soumu and any(ex in href_lower for ex in ["soshiki", "kokusai", "denki", "tokei", "sounum"]):
+                    if not any(k in href_lower for k in ["jinji", "meibo"]):
+                        continue
+
                 if (
                     clean_path.endswith(".pdf")
                     or clean_path.endswith(".html")
@@ -512,8 +520,9 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
 
             if deep_crawl:
                 sub_links = []
-                # 地方整備局の場合は深掘り件数上限を拡大（最大60ページ）
-                scan_limit = 60 if "mlit.go.jp" in scan_target else 30
+                # 巡回上限を最適化（総務省等は最大15件、整備局は最大50件）
+                scan_limit = 15 if is_soumu else (50 if "mlit.go.jp" in scan_target else 25)
+                
                 for l in links[:scan_limit]:
                     l_path = urlparse(l).path.lower()
                     if (l_path.endswith(".html") or l_path.endswith(".htm") or l_path.endswith("/")) and not is_old_archive_link(l):
@@ -529,12 +538,20 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
                                     continue
 
                                 sub_path = urlparse(sub_target).path.lower()
-                                if (
-                                    sub_path.endswith(".pdf")
-                                    or any(k in sub_target.lower() for k in ["jinji", "kisha", "press", "happyou", "release", "00"])
-                                ):
-                                    if sub_target not in links and sub_target not in sub_links:
-                                        sub_links.append(sub_target)
+                                sub_lower = sub_target.lower()
+                                
+                                # 総務省用深掘りフィルター
+                                if is_soumu:
+                                    if sub_path.endswith(".pdf") and any(k in sub_lower for k in ["jinji", "meibo", "idou"]):
+                                        if sub_target not in links and sub_target not in sub_links:
+                                            sub_links.append(sub_target)
+                                else:
+                                    if (
+                                        sub_path.endswith(".pdf")
+                                        or any(k in sub_lower for k in ["jinji", "kisha", "press", "happyou", "release"])
+                                    ):
+                                        if sub_target not in links and sub_target not in sub_links:
+                                            sub_links.append(sub_target)
                         except Exception:
                             continue
                 links.extend(sub_links)
@@ -706,7 +723,7 @@ def check_ministries():
             print(f"【巡回中】{site_name} をチェックしています...")
             overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)"}
             
-            # 地方整備局および主要省庁は全て深掘り（deep_crawl）を有効化
+            # 総務省、文部科学省、地方整備局等は深掘り（deep_crawl）を有効化
             deep_crawl_flag = True if any(k in site_name for k in ["総務省", "文部科学省", "時評", "地方整備局"]) else False
             
             current_headers = headers.copy()
@@ -750,9 +767,8 @@ def check_ministries():
                                 "meibo" in target_url
                                 or "list_ja.pdf" in target_url
                                 or "幹部名簿" in site_name
-                                or "総務省" in site_name
-                                or "地方整備局" in site_name
                             )
+                            # 直近30日以前の古いPDFは解析から除外
                             if pdf_date and not is_static_or_key_site and "kanpou" not in target_url:
                                 if pdf_date < thirty_days_ago:
                                     continue
