@@ -164,10 +164,11 @@ GMAIL_APP_PASSWORD = os.environ.get(
 )
 
 TARGET_SITES = {
+    # 本省・関係機関
     "総務省(人事・組織)": (
         "https://www.soumu.go.jp/menu_sosiki/annai/soshiki/jinji/index.html"
     ),
-    "国土交通省(人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
+    "国土交通省(本省人事ページ)": "https://www.mlit.go.jp/about/R8jinji.html",
     "農林水産省(人事異動)": (
         "https://www.maff.go.jp/j/org/who/meibo/personnel_change/index.html"
     ),
@@ -182,6 +183,15 @@ TARGET_SITES = {
     "復興庁(人事)": "https://www.reconstruction.go.jp/topics/cat-114/jinji/",
     "時事公報(人事ニュース)": "https://www.jihyo.co.jp/jinji_news/",
     "インターネット官報": "https://kanpou.npb.go.jp/",
+    # 国土交通省 地方整備局
+    "国土交通省(東北地方整備局)": "https://www.thr.mlit.go.jp/kisha/index.html",
+    "国土交通省(関東地方整備局)": "https://www.ktr.mlit.go.jp/kisha/index.html",
+    "国土交通省(北陸地方整備局)": "https://www.hrr.mlit.go.jp/press/",
+    "国土交通省(中部地方整備局)": "https://www.cbr.mlit.go.jp/kisha/",
+    "国土交通省(近畿地方整備局)": "https://www.kkr.mlit.go.jp/kisha/",
+    "国土交通省(中国地方整備局)": "https://www.cgr.mlit.go.jp/kisha/",
+    "国土交通省(四国地方整備局)": "https://www.skr.mlit.go.jp/kisha/",
+    "国土交通省(九州地方整備局)": "https://www.qsr.mlit.go.jp/kisha/",
 }
 
 
@@ -409,12 +419,12 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
             target_url = clean_and_validate_url(url, href)
             if not target_url:
                 continue
-            # 【改善1】総務省等で異動の階層ページを広く取得できるようにキー判定を拡充
+            # 地方整備局などの「記者発表(kisha/press)」キーワード等も網羅
             if (
                 href.endswith(".pdf")
                 or href.endswith(".html")
                 or href.endswith(".htm")
-                or any(k in href for k in ["jidou", "jinji", "meibo", "renkei", "annai", "main_content"])
+                or any(k in href for k in ["jidou", "jinji", "meibo", "renkei", "annai", "main_content", "kisha", "press", "release"])
             ):
                 if target_url not in links:
                     links.append(target_url)
@@ -422,8 +432,8 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
             sub_links = []
             for l in links:
                 if (l.endswith(".html") or l.endswith(".htm")) and (
-    any(k in l for k in ["jinji", "sosiki", "meibo", "saiyou", "b_menu", "intro", "annai", "jinji_news"])
-):
+                    any(k in l for k in ["jinji", "sosiki", "meibo", "saiyou", "b_menu", "intro", "annai", "jinji_news", "kisha", "press"])
+                ):
                     try:
                         time.sleep(0.5)
                         sub_res = session.get(l, headers=headers, timeout=20)
@@ -433,7 +443,7 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
                             sub_target = clean_and_validate_url(l, sub_href)
                             if (
                                 sub_target
-                                and (sub_target.endswith(".pdf") or "jinji" in sub_target)
+                                and (sub_target.endswith(".pdf") or "jinji" in sub_target or "kisha" in sub_target)
                                 and sub_target not in links
                                 and sub_target not in sub_links
                             ):
@@ -602,7 +612,7 @@ def check_ministries():
         for site_name, url in TARGET_SITES.items():
             print(f"【巡回中】{site_name} をチェックしています...")
             overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)"}
-            deep_crawl_flag = True if any(k in site_name for k in ["総務省", "文部科学省", "時評"]) else False
+            deep_crawl_flag = True if any(k in site_name for k in ["総務省", "文部科学省", "時評", "地方整備局"]) else False
             current_headers = headers.copy()
             if "meti.go.jp" in url:
                 current_headers["Referer"] = "https://www.meti.go.jp/"
@@ -637,19 +647,18 @@ def check_ministries():
                             pdf_date_str = meta.get("ModDate") or meta.get("CreationDate")
                             pdf_date = parse_pdf_date(pdf_date_str)
                             
-                            # 【改善2】時系列前後・メタデータ不順に対応するため総務省等の異動ページからのPDFは日付フィルタを除外
                             is_static_or_key_site = (
                                 "meibo" in target_url
                                 or "list_ja.pdf" in target_url
                                 or "幹部名簿" in site_name
                                 or "総務省" in site_name
+                                or "地方整備局" in site_name
                             )
                             if pdf_date and not is_static_or_key_site and "kanpou" not in target_url:
                                 if pdf_date < thirty_days_ago:
                                     continue
 
                             for idx, page in enumerate(pdf.pages, 1):
-                                # 【改善3】レイアウト付き抽出と通常抽出の両方をフォールバック取得
                                 page_raw = page.extract_text(layout=True) or ""
                                 page_raw_simple = page.extract_text(layout=False) or ""
                                 
@@ -658,6 +667,7 @@ def check_ministries():
                                     or "総務省" in site_name
                                     or "インターネット官報" in site_name
                                     or "経済産業省" in site_name
+                                    or "地方整備局" in site_name
                                     or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0)
                                 ):
                                     v_text = extract_vertical_text_from_page(page)
@@ -737,6 +747,7 @@ def check_ministries():
                         or "jinji" in target_url
                         or "meibo" in target_url
                         or "kanpou" in target_url
+                        or "kisha" in target_url
                     ):
                         warn_info = {"site_name": site_name, "url": target_url}
                         if warn_info not in image_pdf_warnings:
