@@ -3,7 +3,7 @@ name: Jinji Monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: '5 21 * * *' # 日本時間の毎日午前09:05に実行
+    - cron: '5 22 * * *' # 日本時間の毎日午前09:05に実行
 
 jobs:
   run-script:
