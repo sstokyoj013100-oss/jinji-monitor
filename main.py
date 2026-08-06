@@ -163,6 +163,7 @@ GMAIL_APP_PASSWORD = os.environ.get(
     "GMAIL_APP_PASSWORD", "qdfy qhwd bssx ptca"
 )
 
+# 分析に基づき、個別最適化したターゲットURL一覧
 TARGET_SITES = {
     # 本省・関係機関
     "総務省(人事・組織)": (
@@ -183,15 +184,21 @@ TARGET_SITES = {
     "復興庁(人事)": "https://www.reconstruction.go.jp/topics/cat-114/jinji/",
     "時事公報(人事ニュース)": "https://www.jihyo.co.jp/jinji_news/",
     "インターネット官報": "https://kanpou.npb.go.jp/",
-    # 国土交通省 地方整備局
-    "国土交通省(東北地方整備局)": "https://www.thr.mlit.go.jp/kisha/index.html",
-    "国土交通省(関東地方整備局)": "https://www.ktr.mlit.go.jp/kisha/index.html",
+    # 国土交通省 地方整備局 (各省庁構造へ個別最適化)
+    "国土交通省(東北地方整備局)": (
+        "https://www.thr.mlit.go.jp/Bumon/B00013/K00120/jinji/jinjiindex.html"
+    ),
+    "国土交通省(関東地方整備局)": (
+        "https://www.ktr.mlit.go.jp/soshiki/soshiki00000034.html"
+    ),
     "国土交通省(北陸地方整備局)": "https://www.hrr.mlit.go.jp/press/",
-    "国土交通省(中部地方整備局)": "https://www.cbr.mlit.go.jp/kisha/",
+    "国土交通省(中部地方整備局)": "https://www.cbr.mlit.go.jp/kisya/index.htm",
     "国土交通省(近畿地方整備局)": "https://www.kkr.mlit.go.jp/kisha/",
     "国土交通省(中国地方整備局)": "https://www.cgr.mlit.go.jp/kisha/",
-    "国土交通省(四国地方整備局)": "https://www.skr.mlit.go.jp/kisha/",
-    "国土交通省(九州地方整備局)": "https://www.qsr.mlit.go.jp/kisha/",
+    "国土交通省(四国地方整備局)": "https://www.skr.mlit.go.jp/pres/index.html",
+    "国土交通省(九州地方整備局)": (
+        "https://www.qsr.mlit.go.jp/nt_list/nt1/index.html"
+    ),
 }
 
 
@@ -370,8 +377,12 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
     try:
         res = session.get(base_url, headers=headers, timeout=20)
         res.encoding = res.apparent_encoding
-        
-        pdf_matches = re.findall(r"""href=["']([^"']+\.pdf(?:\?[^"']*)?)["']""", res.text, re.IGNORECASE)
+
+        pdf_matches = re.findall(
+            r"""href=["']([^"']+\.pdf(?:\?[^"']*)?)["']""",
+            res.text,
+            re.IGNORECASE,
+        )
         for pdf_path in pdf_matches:
             full_pdf_url = clean_and_validate_url(base_url, pdf_path)
             if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
@@ -381,7 +392,11 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
         sub_pages = []
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"].strip()
-            if "kanpou" in href or href.endswith(".html") or href.endswith(".htm"):
+            if (
+                "kanpou" in href
+                or href.endswith(".html")
+                or href.endswith(".htm")
+            ):
                 sub_url = clean_and_validate_url(base_url, href)
                 if sub_url and sub_url not in sub_pages and sub_url != base_url:
                     sub_pages.append(sub_url)
@@ -389,7 +404,11 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
         for sub_url in sub_pages[:10]:
             try:
                 sub_res = session.get(sub_url, headers=headers, timeout=15)
-                sub_pdf_matches = re.findall(r"""href=["']([^"']+\.pdf(?:\?[^"']*)?)["']""", sub_res.text, re.IGNORECASE)
+                sub_pdf_matches = re.findall(
+                    r"""href=["']([^"']+\.pdf(?:\?[^"']*)?)["']""",
+                    sub_res.text,
+                    re.IGNORECASE,
+                )
                 for pdf_path in sub_pdf_matches:
                     full_pdf_url = clean_and_validate_url(sub_url, pdf_path)
                     if full_pdf_url and full_pdf_url not in kanpou_pdf_links:
@@ -404,63 +423,16 @@ def collect_kanpou_links_dynamic(session, base_url, headers):
 
 
 def is_old_archive_link(href_url):
-    """過去数年分より前のアーカイブURLかどうか判定する（過剰ヒット防止）"""
+    """過去2年以上前の古すぎるアーカイブリンクを弾く（過剰巡回防止）"""
     now_year = datetime.now().year
     valid_years = {str(now_year), str(now_year - 1)}
-    
+
     year_matches = re.findall(r"/(20\d{2})/", href_url)
     if year_matches:
         for y in year_matches:
             if y not in valid_years:
                 return True
     return False
-
-
-def generate_regional_fallback_urls(base_url):
-    """地方整備局限定の補完ロジック"""
-    now = datetime.now()
-    year_str = now.strftime("%Y")
-    
-    fallbacks = []
-    if "thr.mlit.go.jp" in base_url:  # 東北
-        fallbacks.extend([
-            urljoin(base_url, f"press/{year_str}/"),
-            urljoin(base_url, "press/"),
-            urljoin(base_url, "kisha.html")
-        ])
-    elif "ktr.mlit.go.jp" in base_url:  # 関東
-        fallbacks.extend([
-            urljoin(base_url, f"kisha_{year_str}.html"),
-            urljoin(base_url, f"date/{year_str}/"),
-            urljoin(base_url, "press/")
-        ])
-    elif "cbr.mlit.go.jp" in base_url:  # 中部
-        fallbacks.extend([
-            urljoin(base_url, f"press/{year_str}/"),
-            urljoin(base_url, f"kisha/{year_str}/"),
-            urljoin(base_url, "press_release/")
-        ])
-    elif "skr.mlit.go.jp" in base_url:  # 四国
-        fallbacks.extend([
-            urljoin(base_url, f"press/{year_str}/"),
-            urljoin(base_url, "press/")
-        ])
-    elif "qsr.mlit.go.jp" in base_url:  # 九州
-        fallbacks.extend([
-            urljoin(base_url, f"site_files/file/kisha/{year_str}/"),
-            urljoin(base_url, "press/")
-        ])
-    elif "cgr.mlit.go.jp" in base_url:  # 中国
-        fallbacks.extend([
-            urljoin(base_url, f"kisha/{year_str}/"),
-            urljoin(base_url, "press/")
-        ])
-    elif "kkr.mlit.go.jp" in base_url:  # 近畿
-        fallbacks.extend([
-            urljoin(base_url, f"kisha/pdf/{year_str}/"),
-            urljoin(base_url, "press/")
-        ])
-    return fallbacks
 
 
 def collect_links_from_url(session, url, headers, deep_crawl=False):
@@ -470,94 +442,124 @@ def collect_links_from_url(session, url, headers, deep_crawl=False):
     parsed_url = urlparse(url)
     if parsed_url.path.lower().endswith(".pdf"):
         return [url]
-        
-    links = []
-    urls_to_scan = [url]
-    
-    # 地方整備局限定でフォールバックサブURLを生成
-    if "mlit.go.jp" in url and "地方整備局" in str(url):
-        urls_to_scan.extend(generate_regional_fallback_urls(url))
 
+    links = []
     is_soumu = "soumu.go.jp" in url
 
-    for scan_target in set(urls_to_scan):
-        try:
-            res = session.get(scan_target, headers=headers, timeout=20)
-            res.encoding = res.apparent_encoding
-            soup = BeautifulSoup(res.text, "html.parser")
-            
-            # 総務省用（過剰拡大防止のための厳格キーワード）と一般用を分離
-            if is_soumu:
-                keywords = ["jinji", "houdou", "meibo", "shoukyou", "idou", "pdf"]
-            else:
-                keywords = [
-                    "jidou", "jinji", "meibo", "renkei", "annai", "main_content",
-                    "kisha", "press", "release", "happyou", "pdf", "html", "htm"
-                ]
+    try:
+        res = session.get(url, headers=headers, timeout=20)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
 
-            for a_tag in soup.find_all("a", href=True):
-                href = a_tag["href"].strip()
-                target_url = clean_and_validate_url(scan_target, href)
-                if not target_url or is_old_archive_link(target_url):
+        # 総務省用と一般・整備局用で検索キーを制御
+        if is_soumu:
+            keywords = ["jinji", "houdou", "meibo", "shoukyou", "idou", "pdf"]
+        else:
+            keywords = [
+                "jidou",
+                "jinji",
+                "meibo",
+                "kisha",
+                "press",
+                "pres",
+                "release",
+                "happyou",
+                "nt_list",
+                "pdf",
+                "html",
+                "htm",
+            ]
+
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag["href"].strip()
+            target_url = clean_and_validate_url(url, href)
+            if not target_url or is_old_archive_link(target_url):
+                continue
+
+            href_lower = href.lower()
+            clean_path = urlparse(target_url).path.lower()
+
+            if is_soumu and any(
+                ex in href_lower
+                for ex in ["soshiki", "kokusai", "denki", "tokei", "sounum"]
+            ):
+                if not any(k in href_lower for k in ["jinji", "meibo"]):
                     continue
 
-                href_lower = href.lower()
-                clean_path = urlparse(target_url).path.lower()
-                
-                # 総務省の場合、組織案内や全般ニュースなどの無関係ページを除外
-                if is_soumu and any(ex in href_lower for ex in ["soshiki", "kokusai", "denki", "tokei", "sounum"]):
-                    if not any(k in href_lower for k in ["jinji", "meibo"]):
-                        continue
+            if (
+                clean_path.endswith(".pdf")
+                or clean_path.endswith(".html")
+                or clean_path.endswith(".htm")
+                or any(k in href_lower for k in keywords)
+            ):
+                if target_url not in links:
+                    links.append(target_url)
 
+        # 第2層（各月リストページ内等）の深掘り収集
+        if deep_crawl:
+            sub_links = []
+            scan_limit = (
+                15 if is_soumu else 30
+            )  # 北陸等の暴走を防ぐため上限30件に調整
+
+            for l in links[:scan_limit]:
+                l_path = urlparse(l).path.lower()
                 if (
-                    clean_path.endswith(".pdf")
-                    or clean_path.endswith(".html")
-                    or clean_path.endswith(".htm")
-                    or any(k in href_lower for k in keywords)
-                ):
-                    if target_url not in links:
-                        links.append(target_url)
+                    l_path.endswith(".html")
+                    or l_path.endswith(".htm")
+                    or l_path.endswith("/")
+                ) and not is_old_archive_link(l):
+                    try:
+                        time.sleep(0.1)
+                        sub_res = session.get(l, headers=headers, timeout=15)
+                        sub_res.encoding = sub_res.apparent_encoding
+                        sub_soup = BeautifulSoup(
+                            sub_res.text, "html.parser"
+                        )
+                        for sub_a in sub_soup.find_all("a", href=True):
+                            sub_href = sub_a["href"].strip()
+                            sub_target = clean_and_validate_url(l, sub_href)
+                            if not sub_target or is_old_archive_link(
+                                sub_target
+                            ):
+                                continue
 
-            if deep_crawl:
-                sub_links = []
-                # 巡回上限を最適化（総務省等は最大15件、整備局は最大50件）
-                scan_limit = 15 if is_soumu else (50 if "mlit.go.jp" in scan_target else 25)
-                
-                for l in links[:scan_limit]:
-                    l_path = urlparse(l).path.lower()
-                    if (l_path.endswith(".html") or l_path.endswith(".htm") or l_path.endswith("/")) and not is_old_archive_link(l):
-                        try:
-                            time.sleep(0.2)
-                            sub_res = session.get(l, headers=headers, timeout=15)
-                            sub_res.encoding = sub_res.apparent_encoding
-                            sub_soup = BeautifulSoup(sub_res.text, "html.parser")
-                            for sub_a in sub_soup.find_all("a", href=True):
-                                sub_href = sub_a["href"].strip()
-                                sub_target = clean_and_validate_url(l, sub_href)
-                                if not sub_target or is_old_archive_link(sub_target):
-                                    continue
+                            sub_path = urlparse(sub_target).path.lower()
+                            sub_lower = sub_target.lower()
 
-                                sub_path = urlparse(sub_target).path.lower()
-                                sub_lower = sub_target.lower()
-                                
-                                # 総務省用深掘りフィルター
-                                if is_soumu:
-                                    if sub_path.endswith(".pdf") and any(k in sub_lower for k in ["jinji", "meibo", "idou"]):
-                                        if sub_target not in links and sub_target not in sub_links:
-                                            sub_links.append(sub_target)
-                                else:
+                            if is_soumu:
+                                if sub_path.endswith(".pdf") and any(
+                                    k in sub_lower
+                                    for k in ["jinji", "meibo", "idou"]
+                                ):
                                     if (
-                                        sub_path.endswith(".pdf")
-                                        or any(k in sub_lower for k in ["jinji", "kisha", "press", "happyou", "release"])
+                                        sub_target not in links
+                                        and sub_target not in sub_links
                                     ):
-                                        if sub_target not in links and sub_target not in sub_links:
-                                            sub_links.append(sub_target)
-                        except Exception:
-                            continue
-                links.extend(sub_links)
+                                        sub_links.append(sub_target)
+                            else:
+                                if sub_path.endswith(".pdf") or any(
+                                    k in sub_lower
+                                    for k in [
+                                        "jinji",
+                                        "kisha",
+                                        "press",
+                                        "pres",
+                                        "happyou",
+                                        "release",
+                                    ]
+                                ):
+                                    if (
+                                        sub_target not in links
+                                        and sub_target not in sub_links
+                                    ):
+                                        sub_links.append(sub_target)
+                    except Exception:
+                        continue
+            links.extend(sub_links)
 
-        except Exception as e:
-            print(f"リンク収集エラー ({scan_target}): {e}")
+    except Exception as e:
+        print(f"リンク収集エラー ({url}): {e}")
 
     return list(dict.fromkeys(links))
 
@@ -567,22 +569,26 @@ def download_file_safely(session, url, headers):
         is_meti = "meti.go.jp" in url
         parsed_path = urlparse(url).path.lower()
         is_pdf = parsed_path.endswith(".pdf")
-        
+
         current_headers = headers.copy()
         if is_meti:
             current_headers["Referer"] = "https://www.meti.go.jp/"
             if is_pdf:
                 current_headers["Accept"] = "application/pdf,*/*"
-                
+
         connect_timeout = 180 if (is_meti and is_pdf) else 20
         download_limit_time = 180 if (is_meti and is_pdf) else 20
-        
+
         with session.get(
             url, headers=current_headers, timeout=connect_timeout, stream=True
         ) as res:
             res.raise_for_status()
             content_type = res.headers.get("Content-Type", "")
-            if is_pdf and "pdf" not in content_type.lower() and "octet-stream" not in content_type.lower():
+            if (
+                is_pdf
+                and "pdf" not in content_type.lower()
+                and "octet-stream" not in content_type.lower()
+            ):
                 return None
             content = bytearray()
             start_time = time.time()
@@ -659,12 +665,14 @@ def build_grouped_email_body_v2(hits_dict, history_keys, include_old=True):
 def check_ministries():
     is_manual_run = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
     if is_manual_run:
-        print("【手動実行モード】テスト実行のため「定期報告メール」のみを送信します。履歴の更新・保存はスキップされます。")
+        print(
+            "【手動実行モード】テスト実行のため「定期報告メール」のみを送信します。履歴の更新・保存はスキップされます。"
+        )
 
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-            " like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         ),
         "Accept": (
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
@@ -694,7 +702,10 @@ def check_ministries():
 
     current_month = now.month
 
-    if current_month in [6, 7, 8] and last_important_status != f"{now.year}_active":
+    if (
+        current_month in [6, 7, 8]
+        and last_important_status != f"{now.year}_active"
+    ):
         notice_subject = "【通知】重要ポジション監視の開始（6月下旬〜8月末期間）"
         notice_body = (
             "人事異動監視システムよりお知らせです。\n\n"
@@ -706,7 +717,9 @@ def check_ministries():
             email_tasks.append((notice_subject, notice_body, TO_ADDRESS_REPORT))
             history_data["important_status"] = f"{now.year}_active"
 
-    elif current_month not in [6, 7, 8] and last_important_status.endswith("_active"):
+    elif current_month not in [6, 7, 8] and last_important_status.endswith(
+        "_active"
+    ):
         notice_subject = "【通知】重要ポジション監視の終了"
         notice_body = (
             "人事異動監視システムよりお知らせです。\n\n"
@@ -721,27 +734,32 @@ def check_ministries():
     try:
         for site_name, url in TARGET_SITES.items():
             print(f"【巡回中】{site_name} をチェックしています...")
-            overall_results[site_name] = {"status": "チェック未完了(エラーの可能性)"}
-            
+            overall_results[site_name] = {
+                "status": "チェック未完了(エラーの可能性)"
+            }
+
             # 総務省、文部科学省、地方整備局等は深掘り（deep_crawl）を有効化
-            deep_crawl_flag = True if any(k in site_name for k in ["総務省", "文部科学省", "時評", "地方整備局"]) else False
-            
+            deep_crawl_flag = True if any(
+                k in site_name
+                for k in ["総務省", "文部科学省", "時評", "地方整備局"]
+            ) else False
+
             current_headers = headers.copy()
             if "meti.go.jp" in url:
                 current_headers["Referer"] = "https://www.meti.go.jp/"
-            
+
             links = collect_links_from_url(
                 session, url, current_headers, deep_crawl=deep_crawl_flag
             )
             if url not in links and "kanpou.npb.go.jp" not in url:
                 links.insert(0, url)
-                
+
             checked_count, hits_in_site = 0, 0
 
             for target_url in links:
                 parsed_target = urlparse(target_url)
                 target_path = parsed_target.path.lower()
-                
+
                 if not (
                     target_path.endswith(".pdf")
                     or target_path.endswith(".html")
@@ -751,75 +769,116 @@ def check_ministries():
                 ):
                     continue
                 try:
-                    file_content = download_file_safely(session, target_url, headers)
+                    file_content = download_file_safely(
+                        session, target_url, headers
+                    )
                     if not file_content:
                         continue
-                    pages_data, is_image_pdf, html_lines_extracted = [], False, []
+                    pages_data, is_image_pdf, html_lines_extracted = (
+                        [],
+                        False,
+                        [],
+                    )
 
                     if target_path.endswith(".pdf"):
                         checked_count += 1
                         with pdfplumber.open(io.BytesIO(file_content)) as pdf:
                             meta = pdf.metadata or {}
-                            pdf_date_str = meta.get("ModDate") or meta.get("CreationDate")
+                            pdf_date_str = meta.get("ModDate") or meta.get(
+                                "CreationDate"
+                            )
                             pdf_date = parse_pdf_date(pdf_date_str)
-                            
+
                             is_static_or_key_site = (
                                 "meibo" in target_url
                                 or "list_ja.pdf" in target_url
                                 or "幹部名簿" in site_name
                             )
                             # 直近30日以前の古いPDFは解析から除外
-                            if pdf_date and not is_static_or_key_site and "kanpou" not in target_url:
+                            if (
+                                pdf_date
+                                and not is_static_or_key_site
+                                and "kanpou" not in target_url
+                            ):
                                 if pdf_date < thirty_days_ago:
                                     continue
 
                             for idx, page in enumerate(pdf.pages, 1):
                                 page_raw = page.extract_text(layout=True) or ""
-                                page_raw_simple = page.extract_text(layout=False) or ""
-                                
+                                page_raw_simple = (
+                                    page.extract_text(layout=False) or ""
+                                )
+
                                 if (
                                     "農林水産省" in site_name
                                     or "総務省" in site_name
                                     or "インターネット官報" in site_name
                                     or "経済産業省" in site_name
                                     or "地方整備局" in site_name
-                                    or (len(page_raw.strip()) < 5 and len(pdf.pages) > 0)
+                                    or (
+                                        len(page_raw.strip()) < 5
+                                        and len(pdf.pages) > 0
+                                    )
                                 ):
-                                    v_text = extract_vertical_text_from_page(page)
+                                    v_text = extract_vertical_text_from_page(
+                                        page
+                                    )
                                     if v_text.strip():
                                         page_raw += "\n" + v_text
-                                
-                                full_page_text = page_raw + "\n" + page_raw_simple
-                                pages_data.append(
-                                    (str(idx), full_page_text, clean_text(full_page_text), page)
+
+                                full_page_text = (
+                                    page_raw + "\n" + page_raw_simple
                                 )
-                        total_raw_len = sum(len(p[1].strip()) for p in pages_data)
+                                pages_data.append((
+                                    str(idx),
+                                    full_page_text,
+                                    clean_text(full_page_text),
+                                    page,
+                                ))
+                        total_raw_len = sum(
+                            len(p[1].strip()) for p in pages_data
+                        )
                         if len(file_content) > 50000 and total_raw_len < 10:
                             is_image_pdf = True
                     else:
                         checked_count += 1
                         html_soup = BeautifulSoup(
-                            file_content.decode("utf-8", errors="ignore"), "html.parser"
+                            file_content.decode("utf-8", errors="ignore"),
+                            "html.parser",
                         )
                         for s in html_soup(["script", "style", "nav", "footer"]):
                             s.decompose()
                         html_text = html_soup.get_text()
                         html_lines_extracted = [
-                            line.strip() for line in html_soup.strings if line.strip()
+                            line.strip()
+                            for line in html_soup.strings
+                            if line.strip()
                         ]
-                        pages_data.append(("-", html_text, clean_text(html_text), None))
+                        pages_data.append((
+                            "-",
+                            html_text,
+                            clean_text(html_text),
+                            None,
+                        ))
 
                     if not is_image_pdf:
                         for member in WATCH_DATA:
                             cleaned_name = member["key_name"]
                             if not cleaned_name:
                                 continue
-                            for page_num, raw_text, cleaned_text_data, page_obj in pages_data:
+                            for (
+                                page_num,
+                                raw_text,
+                                cleaned_text_data,
+                                page_obj,
+                            ) in pages_data:
                                 if is_member_in_text(
                                     cleaned_name, raw_text, cleaned_text_data
                                 ):
                                     new_position_hint = (
-                                        get_surrounding_context_by_line(page_obj, member["name"])
+                                        get_surrounding_context_by_line(
+                                            page_obj, member["name"]
+                                        )
                                         if page_obj
                                         else get_surrounding_context_html_v2(
                                             member["name"], html_lines_extracted
@@ -838,7 +897,8 @@ def check_ministries():
                                     }
                                     target_dict = (
                                         ex_officials_hits
-                                        if member["type"] == "【元幹部職員の異動検知】"
+                                        if member["type"]
+                                        == "【元幹部職員の異動検知】"
                                         else important_positions_hits
                                     )
                                     if cleaned_name not in target_dict:
@@ -849,10 +909,15 @@ def check_ministries():
                                             "sources": [],
                                         }
                                     if not any(
-                                        s["url"] == target_url and s["page"] == source_detail["page"]
-                                        for s in target_dict[cleaned_name]["sources"]
+                                        s["url"] == target_url
+                                        and s["page"] == source_detail["page"]
+                                        for s in target_dict[cleaned_name][
+                                            "sources"
+                                        ]
                                     ):
-                                        target_dict[cleaned_name]["sources"].append(source_detail)
+                                        target_dict[cleaned_name][
+                                            "sources"
+                                        ].append(source_detail)
                                         hits_in_site += 1
                                         current_hits_keys.append(
                                             f"{cleaned_name}_{target_url}_{page_label}"
@@ -863,6 +928,7 @@ def check_ministries():
                         or "meibo" in target_url
                         or "kanpou" in target_url
                         or "kisha" in target_url
+                        or "pres" in target_url
                     ):
                         warn_info = {"site_name": site_name, "url": target_url}
                         if warn_info not in image_pdf_warnings:
@@ -970,7 +1036,15 @@ def check_ministries():
         diff_report_summary += "・【要手動確認・画像PDF検出一括報告】: 新規検出はありませんでした。\n"
 
     # 定期報告メールの作成
-    if is_manual_run or execution_error_occurred or (ex_official_new_count > 0 or important_new_count > 0 or warnings_new_count > 0):
+    if (
+        is_manual_run
+        or execution_error_occurred
+        or (
+            ex_official_new_count > 0
+            or important_new_count > 0
+            or warnings_new_count > 0
+        )
+    ):
         if execution_error_occurred:
             report_subject = "【⚠️システム異常検知】人事異動監視巡回エラー"
             report_body = (
@@ -981,7 +1055,8 @@ def check_ministries():
             manual_prefix = "【手動テスト実行】" if is_manual_run else ""
             report_subject = f"{manual_prefix}【定期報告】人事異動監視エージェント・巡回完了通知"
             report_body = (
-                f"人事異動の監視プログラムが実行されました。（モード: {'手動テスト実行' if is_manual_run else '自動スケジュール実行'}）\n\n"
+                "人事異動の監視プログラムが実行されました。（モード:"
+                f" {'手動テスト実行' if is_manual_run else '自動スケジュール実行'}）\n\n"
             )
 
         report_body += "========================================\n"
@@ -1018,13 +1093,17 @@ def check_ministries():
     # 履歴をマージして保存
     if not is_manual_run:
         updated_hits = list(history_hits_set.union(current_hits_keys))
-        updated_warnings = list(history_warnings_set.union(current_warnings_urls))
+        updated_warnings = list(
+            history_warnings_set.union(current_warnings_urls)
+        )
 
         history_data["hits"] = updated_hits
         history_data["warnings"] = updated_warnings
         save_history(history_data)
     else:
-        print("【手動実行モード】テスト実行のため、検知履歴の更新・保存をスキップしました。")
+        print(
+            "【手動実行モード】テスト実行のため、検知履歴の更新・保存をスキップしました。"
+        )
 
 
 if __name__ == "__main__":
