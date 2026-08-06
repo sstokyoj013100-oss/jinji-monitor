@@ -738,11 +738,15 @@ def check_ministries():
                 "status": "チェック未完了(エラーの可能性)"
             }
 
-            # 総務省、文部科学省、地方整備局等は深掘り（deep_crawl）を有効化
-            deep_crawl_flag = True if any(
-                k in site_name
-                for k in ["総務省", "文部科学省", "時評", "地方整備局"]
-            ) else False
+            # 総務省、文部科学省、時評、および「北陸以外」の地方整備局で deep_crawl を有効化
+            # （北陸整備局のみトップ階層＋直下リンクに限定して検証件数を適正化）
+            if "北陸地方整備局" in site_name:
+                deep_crawl_flag = False
+            else:
+                deep_crawl_flag = True if any(
+                    k in site_name
+                    for k in ["総務省", "文部科学省", "時評", "地方整備局"]
+                ) else False
 
             current_headers = headers.copy()
             if "meti.go.jp" in url:
