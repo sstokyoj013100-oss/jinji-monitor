@@ -77,7 +77,7 @@ def load_watch_data():
                 "name": name,
                 "key_name": clean_text(name),
                 "agency": agency,
-                "memo": f"元下関役職: {shimonoseki_title}",
+                "memo": f"元下関役職（または監視理由）: {shimonoseki_title}",
                 "type": "【元幹部職員の異動検知】",
             })
     except Exception as e:
@@ -622,7 +622,7 @@ def build_grouped_email_body_v2(hits_dict, history_keys, include_old=True):
         if new_sources:
             new_item_count += len(new_sources)
             new_hits_body += f"■ 氏名: {info['display_name']}\n"
-            new_hits_body += f"  ・ 所属省庁: {info['agency']}\n"
+            new_hits_body += f"  ・ 参照元リスト: {info['agency']}\n"
             new_hits_body += f"  ・ 備考: {info['memo']}\n"
             new_hits_body += "  ・ 検知ソース:\n"
             for i, src in enumerate(new_sources, 1):
@@ -636,7 +636,7 @@ def build_grouped_email_body_v2(hits_dict, history_keys, include_old=True):
             old_hits_body += (
                 f"■ 氏名: {info['display_name']} (前回以前から継続掲載中)\n"
             )
-            old_hits_body += f"  ・ 所属省庁: {info['agency']}\n"
+            old_hits_body += f"  ・ 参照元リスト: {info['agency']}\n"
             old_hits_body += f"  ・ 備考: {info['memo']}\n"
             old_hits_body += "  ・ 検知ソース:\n"
             for i, src in enumerate(old_sources, 1):
